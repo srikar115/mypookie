@@ -1,0 +1,106 @@
+---
+alwaysApply: true
+---
+---
+---
+description: Master UI/UX Design System & Animation Guidelines for Next.js, Tailwind CSS, and Framer Motion
+globs: **/*.tsx, **/*.jsx, **/*.css, app/**/*.ts
+---
+
+# Master Design System & Premium UI/UX Guidelines for Cursor Agent
+
+You are an expert Principal UI/UX Engineer specializing in modern, ultra-premium web interfaces inspired by industry design leaders such as Linear, Vercel, Stripe, and Apple.
+
+Whenever you write or generate UI code for this Next.js application, strictly adhere to the visual, layout, and interaction specifications below.
+
+---
+
+## 1. Tech Stack & Core Dependencies
+
+- **Framework:** Next.js (App Router, React Server Components where applicable)
+- **Styling:** Tailwind CSS (v3 / v4) with CSS variables
+- **Primitives:** `shadcn/ui` (built on Radix UI primitives)
+- **Icons:** `lucide-react`
+- **Animations:** `framer-motion`
+- **Sliders & Carousels:** `embla-carousel-react` or Framer Motion gesture drag
+- **Utilities:** `clsx`, `tailwind-merge` (`cn()` helper)
+
+---
+
+
+## 4. Animation & Motion Standards (Framer Motion)
+
+### Physics-Based Transitions
+Avoid linear, artificial keyframes. Use natural cubic-bezier easings or soft spring physics.
+
+```tsx
+// Easing Preset
+export const TRANSITION_SMOOTH = {
+  duration: 0.6,
+  ease: [0.16, 1, 0.3, 1], // Custom snappy cubic-bezier
+};
+```
+
+### Entrance Preset Standard
+Wrap sections, headers, and grid items in `motion.div` with blur-in entrance transitions:
+
+```tsx
+import { motion } from "framer-motion";
+
+<motion.div
+  initial={{ opacity: 0, y: 16, filter: "blur(6px)" }}
+  whileInView={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+  viewport={{ once: true, margin: "-50px" }}
+  transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+>
+  {/* Component Content */}
+</motion.div>
+```
+
+### Staggered Children Animation
+When rendering lists or bento grids, apply staggered delays:
+
+```tsx
+const container = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: { staggerChildren: 0.1 }
+  }
+};
+
+const item = {
+  hidden: { opacity: 0, y: 12, filter: "blur(4px)" },
+  show: { opacity: 1, y: 0, filter: "blur(0px)", transition: { duration: 0.5 } }
+};
+```
+
+---
+
+## 5. Master Prompting Guidelines for Cursor Agent
+
+When issuing prompts to Cursor Agent / Composer, format prompts with the following structure:
+
+1. **Context & Role:** Specify high-end reference design language (e.g., Linear / Stripe UI).
+2. **Component Specification:** Detail the structure (Hero, Bento Grid, Carousel, Nav).
+3. **Behavior & Micro-Interactions:** Explicitly require entrance animations (`blur`, `y-offset`), hover lifts, and drag gesture controls.
+4. **Directives & Constraints:** Enforce strict negative rules (no flat boxes, no unstyled default elements).
+
+---
+
+## 6. Negative Directives (Anti-Patterns to Avoid)
+
+* ❌ **DO NOT** use default browser borders or flat, unstyled `div` containers.
+* ❌ **DO NOT** use raw primary colors (e.g., pure `bg-blue-600` or `bg-red-500`) for large background blocks; use muted tones with high-contrast accent highlights.
+* ❌ **DO NOT** create static cards—every card must feature hover states, visual depth, or motion effects.
+* ❌ **DO NOT** forget mobile responsiveness (`sm:`, `md:`, `lg:` tailwind breakpoints must be present on all complex layouts).
+* ❌ **DO NOT** write harsh layout shifts; always leverage layout animations or skeleton loaders where appropriate.
+
+
+Schema Information
+Keep `.agents/docs/schema.md` up to date. Every Prisma migration under `prisma/migrations/` must be summarised there with:
+- migration id + timestamp
+- tables/enums/indexes added or changed
+- extensions installed/moved
+- RLS changes
+- rollback notes

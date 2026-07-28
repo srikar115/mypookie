@@ -1,0 +1,162 @@
+---
+description: Full-stack Next.js SOLID modular monolith — the mandatory architecture for every feature in this codebase. Reference doc at .agents/docs/nextjs_fullstack_solid_modular_architecture.docx.
+alwaysApply: true
+---
+
+# Architecture — Non-negotiable rules
+
+Amorify is a **modular monolith**: one Next.js deployable, separated internally into feature modules and clean layers. Framework code lives at the edges; business rules live in framework-independent domain / application code.
+
+The full blueprint (with rationale, examples, migration plan, and testing strategy) lives at `.agents/docs/nextjs_fullstack_solid_modular_architecture.docx`. Read it end-to-end at least once. This file is the **short enforceable version**.
+
+---
+
+## The 12 rules that fail review
+
+1. **`src/app/` is a delivery layer, not a business-logic layer.** Pages, layouts, Server Actions, and Route Handlers exist to translate transport concerns into use-case calls. They never own business rules.
+2. **Organize primarily by feature module**, not by technical concern. Business capabilities (`identity`, `chat`, `memory`, `billing`, `credits`, `generations`, `moderation`, …) each live under `src/modules/<feature>/`.
+3. **Pages, Server Actions, and Route Handlers call use cases.** They do not query Prisma, call Stripe, hit R2, or hit Redis directly.
+4. **Use cases do not import `next/*`, `react`, `@prisma/client`, or provider SDKs.** They depend on repository interfaces and application ports.
+5. **Domain code is plain TypeScript and enforces invariants.** Entities and value objects live in `<module>/domain/`.
+6. **Infrastructure implements inward-facing ports.** Concrete Prisma / Stripe / R2 / Redis / OpenAI clients live under `<module>/infrastructure/` (or `src/shared/infrastructure/` when genuinely cross-cutting).
+7. **Modules import each other only through the module's root `index.ts`.** No deep imports like `@/modules/billing/domain/entities/subscription`. If you need something from another module, its `index.ts` must export it.
+8. **Server Components are the default; Client Components are small islands.** A file gets `"use client"` only if it uses browser APIs or React state/effects.
+9. **Every server entry point authenticates, authorizes, and validates.** A Server Action or Route Handler that skips any of these three is a bug. "Hidden button" is not an authorization boundary.
+10. **Transactions belong to use-case workflows.** A use case that must write atomically owns the `unitOfWork.run(...)` call. Repositories and adapters do not.
+11. **External side effects use idempotency and durable retry.** Payment, webhook, generation, and email operations require idempotency keys and either a durable queue or an outbox — never a naive HTTP call inside a request.
+12. **Architecture boundaries are enforced in CI.** The ESLint `no-restricted-imports` config in `eslint.config.mjs` fails the build on violations. Do not disable it locally.
+
+---
+
+## Directory contract
+
+```
+src/
+├── app/                              # routing + composition only
+├── components/                       # legacy UI primitives (will migrate to shared/presentation/)
+├── modules/<feature>/                # business capabilities
+│   ├── domain/                       # entities, value objects, domain errors — plain TS
+│   ├── application/                  # use cases, ports, DTOs, policies — no framework
+│   ├── infrastructure/               # Prisma repos, provider adapters — implement ports
+│   ├── presentation/                 # components, actions, schemas, view models
+│   ├── composition/                  # dependency factories (createXUseCase(ctx))
+│   └── index.ts                      # PUBLIC API — only path other modules may import
+├── shared/
+│   ├── application/                  # Result, Clock, IdGenerator, primitives
+│   ├── domain/                       # cross-cutting domain concepts (rare)
+│   ├── infrastructure/               # Prisma client, Redis, R2, logging, startup preflight
+│   ├── presentation/                 # cn(), animations, form-state, UI atoms
+│   └── testing/                      # test builders
+├── composition/                      # getServerContext, module wiring
+├── config/                           # env.ts (validated), routes, feature flags
+└── instrumentation.ts                # startup hook → preflight
+```
+
+### Dependency direction
+
+```
+app + presentation  →  application  →  domain
+                                       ↑
+                    infrastructure  ───┘   (implements domain/application interfaces)
+```
+
+**Domain never points outward.** If a domain file imports from `@/shared/infrastructure` or `next/*`, the design is wrong.
+
+---
+
+## Per-layer contracts
+
+### `app/` (Delivery)
+- Reads cookies, headers, params, form data
+- Transport-level validation (Zod schema on the wire shape)
+- Calls `getServerContext()` → gets an authenticated actor + deps
+- Calls **one** use case
+- Maps result to view model or HTTP response
+- May call `revalidatePath` / `revalidateTag` / `redirect` / `notFound`
+- **Never** imports Prisma, Stripe, OpenAI, R2, Redis directly
+
+### `modules/<feature>/application/` (Application)
+- Loads entities via repository interfaces
+- Runs authorization policies
+- Invokes domain behavior + external service ports
+- Defines transaction boundaries via `unitOfWork.run(...)`
+- Returns `Result<T, E>` or DTOs
+- **Never** imports `next/*`, `react`, `@prisma/client`, `stripe`, `openai`
+
+### `modules/<feature>/domain/` (Domain)
+- Entities with identity + behavior
+- Value objects (`EmailAddress`, `Money`, `CreditAmount`)
+- Domain services when a rule spans multiple entities
+- Repository contracts (interfaces only)
+- Domain errors, domain events
+- **Only** imports from `src/shared/domain/` and pure standard library
+
+### `modules/<feature>/infrastructure/` (Infrastructure)
+- Prisma repository implementations
+- Provider adapters (Stripe, OpenAI, R2, Resend, etc.)
+- Persistence mapping between DB rows and domain entities
+- Normalizes provider errors into typed application errors
+- Implements interfaces declared **inward** — never invents new business rules
+
+### `modules/<feature>/composition/` (Composition)
+- The **only** place that knows about both interfaces and concrete implementations
+- Exports factories like `createStartSubscriptionUseCase(ctx: ServerContext)`
+- Wires Prisma repo + Stripe adapter + audit log into the use case
+
+### `modules/<feature>/index.ts` (Public API)
+- Explicit named exports of:
+  - Server Actions (`export { debitCreditsAction }`)
+  - Composition factories (`export { createGetCreditBalanceQuery }`)
+  - View-model types (`export type { CreditBalanceViewModel }`)
+- **No** exports of domain entities, repositories, adapters, or internal errors
+
+---
+
+## The 6 SOLID rules, applied
+
+| Principle | Concrete rule |
+|---|---|
+| **S**RP | One primary reason to change per file. A Server Action changes when the form changes. A use case changes when the workflow changes. A repository changes when persistence changes. |
+| **O**CP | Add adapters, don't modify use cases. `ImageGenerationPort` is stable; `RunwayAdapter`, `FalAdapter`, `OpenAIAdapter` compose against it. |
+| **L**SP | Every implementation of a port honours the same contract — same not-found behaviour, same timeout semantics, same normalized errors. |
+| **I**SP | Prefer `CreditBalanceReader` (1 method) over a fat `CreditService` (12 methods). Give consumers what they need, nothing more. |
+| **D**IP | High-level workflows depend on abstractions. Prisma, Stripe, R2, OpenAI implement the abstractions — never the other way around. |
+| **Pragmatism** | Do **not** introduce an interface for every local helper. Introduce interfaces only at boundaries that are volatile, externally controlled, expensive to test, or need multiple implementations. |
+
+---
+
+## Environment access
+
+- **`process.env.X` is banned outside `src/config/env.ts`.**
+- All env values are declared + validated in `src/config/env.ts` via Zod.
+- Every other file imports `env` from `@/config/env` and gets a typed, validated object.
+
+---
+
+## Adding a new feature — checklist
+
+1. Create `src/modules/<feature>/` with `domain/`, `application/`, `infrastructure/`, `presentation/`, `composition/`, `index.ts`.
+2. Model the domain: entities, value objects, domain errors.
+3. Declare repository + port interfaces in `application/` (or `domain/` if truly domain-owned).
+4. Write use cases against those interfaces — no framework imports.
+5. Implement repositories + adapters in `infrastructure/`.
+6. Add a composition factory in `composition/` that wires everything using `ServerContext`.
+7. Add Server Actions / Route Handlers in `presentation/` (or `app/`) that call the use case exactly once.
+8. Export the public surface from `index.ts`.
+9. Add unit tests (domain + use case with in-memory repos) and integration tests (Prisma mapping, transactions).
+10. Run `npm run lint` — the boundary rules will catch forbidden imports.
+
+---
+
+## Non-goals (things this architecture is not)
+
+- Not microservices. One deployable.
+- Not "make a class for every function".
+- Not DDD dogma. Simple CRUD modules can skip `domain/`.
+- Not a permission to build a "shared kernel" of vaguely-owned utilities.
+
+---
+
+## When in doubt
+
+Read the full blueprint at `.agents/docs/nextjs_fullstack_solid_modular_architecture.docx`. If a rule here conflicts with the blueprint, the blueprint wins — update this file to match.

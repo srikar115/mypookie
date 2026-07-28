@@ -1,0 +1,176 @@
+import "server-only";
+import { z } from "zod";
+
+/**
+ * The single source of truth for every environment variable this application
+ * consumes. Read once, validated once, exported as a typed object.
+ *
+ *   ✔ `process.env.X` is banned everywhere else — always import `env` from
+ *     `@/config/env` and let TypeScript keep you honest.
+ *   ✔ Missing / malformed values fail loudly at boot instead of surfacing as
+ *     mysterious 500s at request time.
+ *   ✔ This file is server-only: the `import "server-only"` above will trigger
+ *     a build error if a Client Component tries to import it.
+ *
+ * Add new variables here first, then use them. Do not scatter `process.env`
+ * lookups back through the codebase.
+ */
+
+const optionalString = z
+  .string()
+  .transform((v) => v.trim())
+  .transform((v) => (v.length === 0 ? undefined : v))
+  .optional();
+
+const requiredString = (name: string) =>
+  z
+    .string({ error: `${name} is required` })
+    .min(1, `${name} must not be empty`);
+
+const requiredUrl = (name: string) =>
+  z
+    .string({ error: `${name} is required` })
+    .url(`${name} must be a valid URL`);
+
+const boolFromEnv = z
+  .union([z.literal("1"), z.literal("0"), z.literal("true"), z.literal("false")])
+  .optional()
+  .transform((v) => v === "1" || v === "true");
+
+const envSchema = z.object({
+  // Runtime
+  NODE_ENV: z
+    .enum(["development", "test", "production"])
+    .default("development"),
+
+  // Database — Supabase (Postgres) via poolers
+  DATABASE_URL: requiredUrl("DATABASE_URL"),
+  DIRECT_URL: requiredUrl("DIRECT_URL"),
+
+  // NextAuth
+  NEXTAUTH_SECRET: requiredString("NEXTAUTH_SECRET"),
+  NEXTAUTH_URL: optionalString,
+
+  // Redis (rate limiting, job queue, hot memory cache)
+  REDIS_URL: requiredUrl("REDIS_URL"),
+
+  // Storage (Cloudflare R2)
+  STORAGE_PROVIDER: z.enum(["r2", "local", "passthrough"]).default("passthrough"),
+  R2_ENDPOINT: optionalString,
+  R2_BUCKET_NAME: optionalString,
+  R2_ACCESS_KEY_ID: optionalString,
+  R2_SECRET_ACCESS_KEY: optionalString,
+  R2_PUBLIC_URL: optionalString,
+
+  // AI providers (all optional — enable per-feature)
+  OPENAI_API_KEY: optionalString,
+  ANTHROPIC_API_KEY: optionalString,
+  STABILITY_API_KEY: optionalString,
+  RUNWAY_API_KEY: optionalString,
+  KLING_API_KEY: optionalString,
+  FAL_API_KEY: optionalString,
+
+  // OpenRouter is required for live chat + memory extraction.
+  // NOTE: model IDs live in the `model_configs` table — they are intentionally
+  // NOT env vars so admins can swap them at runtime without a redeploy.
+  OPENROUTER_API_KEY: z
+    .string({ error: "OPENROUTER_API_KEY is required" })
+    .min(20, "OPENROUTER_API_KEY must not be empty"),
+
+  // Chat behavior — deploy-time defaults; can be lifted into DB later.
+  CHAT_MAX_HISTORY_TURNS: z
+    .string()
+    .default("20")
+    .transform((v) => Number.parseInt(v, 10))
+    .pipe(z.number().int().positive()),
+  CHAT_MAX_TOKENS: z
+    .string()
+    .default("512")
+    .transform((v) => Number.parseInt(v, 10))
+    .pipe(z.number().int().positive()),
+  CHAT_TEMPERATURE: z
+    .string()
+    .default("0.9")
+    .transform((v) => Number.parseFloat(v))
+    .pipe(z.number().min(0).max(2)),
+  CHAT_SESSION_SUMMARY_EVERY_N_TURNS: z
+    .string()
+    .default("20")
+    .transform((v) => Number.parseInt(v, 10))
+    .pipe(z.number().int().positive()),
+
+  // Memory behavior
+  MEMORY_ENABLED: z
+    .union([z.literal("1"), z.literal("0"), z.literal("true"), z.literal("false")])
+    .default("true")
+    .transform((v) => v === "1" || v === "true"),
+  MEMORY_TOP_K: z
+    .string()
+    .default("5")
+    .transform((v) => Number.parseInt(v, 10))
+    .pipe(z.number().int().positive()),
+
+  // Stripe (billing)
+  STRIPE_SECRET_KEY: optionalString,
+  STRIPE_PUBLISHABLE_KEY: optionalString,
+  STRIPE_WEBHOOK_SECRET: optionalString,
+
+  // Credits
+  NEW_USER_TRIAL_CREDITS: z
+    .string()
+    .default("100")
+    .transform((v) => Number.parseInt(v, 10))
+    .pipe(z.number().int().nonnegative()),
+
+  // Startup preflight controls
+  STARTUP_SKIP_PREFLIGHT: boolFromEnv,
+  STARTUP_REQUIRE_REDIS: z
+    .union([z.literal("1"), z.literal("0")])
+    .optional(),
+
+  // Public app metadata
+  NEXT_PUBLIC_APP_URL: requiredUrl("NEXT_PUBLIC_APP_URL"),
+  NEXT_PUBLIC_APP_NAME: requiredString("NEXT_PUBLIC_APP_NAME"),
+
+  // Next.js internals we occasionally need to branch on
+  NEXT_RUNTIME: optionalString,
+  NEXT_PHASE: optionalString,
+});
+
+/**
+ * When STORAGE_PROVIDER is 'r2', every R2_* variable becomes mandatory. We
+ * enforce this after parsing so the base error messages remain readable.
+ */
+function assertR2ConfigIfEnabled(parsed: z.infer<typeof envSchema>): void {
+  if (parsed.STORAGE_PROVIDER !== "r2") return;
+  const missing: string[] = [];
+  if (!parsed.R2_ENDPOINT) missing.push("R2_ENDPOINT");
+  if (!parsed.R2_BUCKET_NAME) missing.push("R2_BUCKET_NAME");
+  if (!parsed.R2_ACCESS_KEY_ID) missing.push("R2_ACCESS_KEY_ID");
+  if (!parsed.R2_SECRET_ACCESS_KEY) missing.push("R2_SECRET_ACCESS_KEY");
+  if (!parsed.R2_PUBLIC_URL) missing.push("R2_PUBLIC_URL");
+  if (missing.length) {
+    throw new Error(
+      `[config/env] STORAGE_PROVIDER=r2 but missing: ${missing.join(", ")}`,
+    );
+  }
+}
+
+function parseEnv(): z.infer<typeof envSchema> {
+  const parsed = envSchema.safeParse(process.env);
+  if (!parsed.success) {
+    const details = parsed.error.issues
+      .map((issue) => `  · ${issue.path.join(".")}: ${issue.message}`)
+      .join("\n");
+    throw new Error(
+      `[config/env] Environment validation failed:\n${details}\n\n` +
+        `Fix the above and restart. See .env for the full list of required vars.`,
+    );
+  }
+  assertR2ConfigIfEnabled(parsed.data);
+  return parsed.data;
+}
+
+export const env = parseEnv();
+
+export type Env = typeof env;

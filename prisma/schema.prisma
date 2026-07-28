@@ -1,6 +1,12 @@
+// Amorify — schema.
+// Postgres extensions (vector, pg_trgm, pgcrypto, unaccent) live in the
+// `extensions` schema and are installed via raw SQL in the initial migration,
+// NOT via Prisma preview features (postgresqlExtensions was discontinued in
+// Prisma v6.16+). See prisma/migrations/20260727100247_init/migration.sql.
+
+// driverAdapters is stable in Prisma 7 — no preview flag required.
 generator client {
-  provider        = "prisma-client-js"
-  previewFeatures = ["driverAdapters"]
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -10,39 +16,38 @@ datasource db {
 // ─── Auth (NextAuth compatible) ───────────────────────────────────────────────
 
 model User {
-  id            String    @id @default(uuid())
-  email         String    @unique
+  id            String     @id @default(uuid()) @db.Uuid
+  email         String     @unique
   emailVerified DateTime?
   name          String?
   image         String?
   passwordHash  String?
-  role          UserRole  @default(USER)
+  role          UserRole   @default(USER)
   status        UserStatus @default(ACTIVE)
 
   // Age gate & compliance
-  ageConfirmedAt      DateTime?
-  tosAcceptedAt       DateTime?
-  privacyAcceptedAt   DateTime?
+  ageConfirmedAt          DateTime?
+  tosAcceptedAt           DateTime?
+  privacyAcceptedAt       DateTime?
   contentPolicyAcceptedAt DateTime?
-  signupIp            String?
-  signupUserAgent     String?
+  signupIp                String?
+  signupUserAgent         String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  // Relations
-  accounts           Account[]
-  sessions           Session[]
-  profile            UserProfile?
-  companions         Companion[]
-  conversations      Conversation[]
-  creditWallet       CreditWallet?
-  creditTransactions CreditTransaction[]
-  creditReservations CreditReservation[]
-  subscriptions      Subscription[]
-  mediaGenerations   MediaGeneration[]
-  moderationEvents   ModerationEvent[]
-  adminAuditLogs     AdminAuditLog[]
+  accounts       Account[]
+  sessions       Session[]
+  profile        UserProfile?
+  characters     Character[]
+  characterEdits CharacterEditHistory[] @relation("CharacterEditor")
+
+  // Chat + memory back-relations
+  conversations          Conversation[]
+  memoryFacts            MemoryFact[]
+  relationshipStates     RelationshipState[]
+  relationshipMilestones RelationshipMilestone[]
+  modelConfigUpdates     ModelConfig[]           @relation("ModelConfigUpdatedBy")
 
   @@index([email])
   @@index([status])
@@ -50,8 +55,8 @@ model User {
 }
 
 model Account {
-  id                String  @id @default(uuid())
-  userId            String
+  id                String  @id @default(uuid()) @db.Uuid
+  userId            String  @db.Uuid
   type              String
   provider          String
   providerAccountId String
@@ -71,9 +76,9 @@ model Account {
 }
 
 model Session {
-  id           String   @id @default(uuid())
+  id           String   @id @default(uuid()) @db.Uuid
   sessionToken String   @unique
-  userId       String
+  userId       String   @db.Uuid
   expires      DateTime
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -94,13 +99,19 @@ model VerificationToken {
 // ─── User Profiles ────────────────────────────────────────────────────────────
 
 model UserProfile {
-  id          String  @id @default(uuid())
-  userId      String  @unique
+  id          String  @id @default(uuid()) @db.Uuid
+  userId      String  @unique @db.Uuid
   displayName String?
   bio         String?
   avatarUrl   String?
   timezone    String?
   preferences Json    @default("{}")
+
+  // Layer 3b explicit key-value facts injected into every LLM prompt: name,
+  // birthday, pronouns, job, city — populated by the memory extractor when
+  // it emits IDENTITY-category facts. See .agents/docs/memory-architecture.md
+  // §7 for the design intent.
+  structuredFacts Json @default("{}")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -110,475 +121,218 @@ model UserProfile {
   @@map("user_profiles")
 }
 
-// ─── Companions ───────────────────────────────────────────────────────────────
-
-model Companion {
-  id          String          @id @default(uuid())
-  userId      String
-  name        String
-  status      CompanionStatus @default(ACTIVE)
-
-  // Wizard Step 1: Identity
-  companionType    String
-  genderPresentation String
-  ageStyle         String
-
-  // Wizard Step 2: Details
-  relationshipStyle String
-  greetingStyle     String
-
-  // Wizard Step 3: Personality
-  personalityPreset   String?
-  personalityTraits   Json    @default("{}")
-
-  // Wizard Step 4: Appearance
-  visualStyle   String
-  hairColor     String
-  hairstyle     String
-  eyeColor      String
-  buildStyle    String
-  fashionStyle  String
-  overallVibe   String
-  customAppearanceNotes String?
-
-  // Wizard Step 5: Chat Style
-  conversationTone String
-  intimacyLevel    String
-
-  // Wizard Step 6: Memory Preferences
-  memoryPreferences Json @default("{}")
-
-  // Free-form metadata (e.g. defaultMediaSettings used to seed new conversations)
-  metadata Json @default("{}")
-
-  // Generated prompts
-  systemPrompt     String? @db.Text
-  appearancePrompt String? @db.Text
-
-  // Avatar
-  avatarUrl        String?
-  avatarGeneratedAt DateTime?
-
-  // Public template flag (set by admin/seed; visible to all users to clone)
-  isPublic         Boolean @default(false)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  // Relations
-  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
-  memory        CompanionMemory?
-  memoryVersions CompanionMemoryVersion[]
-  conversations  Conversation[]
-  mediaGenerations MediaGeneration[]
-
-  @@index([userId])
-  @@index([status])
-  @@map("companions")
-}
-
-// ─── Memory ───────────────────────────────────────────────────────────────────
-
-model CompanionMemory {
-  id               String  @id @default(uuid())
-  companionId      String  @unique
-  userId           String
-  memoryMarkdown   String  @db.Text
-  memoryJson       Json?
-  version          Int     @default(1)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  companion Companion @relation(fields: [companionId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@map("companion_memories")
-}
-
-model CompanionMemoryVersion {
-  id             String @id @default(uuid())
-  companionId    String
-  memoryMarkdown String @db.Text
-  memoryJson     Json?
-  version        Int
-  changedBy      String
-  changeReason   String?
-
-  createdAt DateTime @default(now())
-
-  companion Companion @relation(fields: [companionId], references: [id], onDelete: Cascade)
-
-  @@index([companionId])
-  @@map("companion_memory_versions")
-}
-
-// ─── Conversations & Messages ─────────────────────────────────────────────────
-
-model Conversation {
-  id             String             @id @default(uuid())
-  userId         String
-  companionId    String
-  title          String?
-  status         ConversationStatus @default(ACTIVE)
-  metadata       Json               @default("{}")
-  lastMessageAt  DateTime?
-
-  // Rolling summary of older messages used to keep persona/story consistent
-  // when conversations grow beyond the live context window.
-  summary                  String? @db.Text
-  summaryThroughMessageId  String?
-  summaryUpdatedAt         DateTime?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  companion Companion @relation(fields: [companionId], references: [id], onDelete: Cascade)
-  messages  Message[]
-
-  @@index([userId])
-  @@index([companionId])
-  @@map("conversations")
-}
-
-model Message {
-  id             String      @id @default(uuid())
-  conversationId String
-  role           MessageRole
-  content        String      @db.Text
-  metadata       Json        @default("{}")
-  creditsUsed    Int         @default(0)
-  modelSlug      String?
-  isModerated    Boolean     @default(false)
-  moderationNote String?
-  mediaUrl       String?
-  mediaType      String?
-
-  createdAt DateTime @default(now())
-
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-
-  @@index([conversationId])
-  @@map("messages")
-}
-
-// ─── Credits & Billing ────────────────────────────────────────────────────────
-
-model CreditWallet {
-  id      String @id @default(uuid())
-  userId  String @unique
-  balance Int    @default(0)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  transactions CreditTransaction[]
-
-  @@map("credit_wallets")
-}
-
-model CreditTransaction {
-  id          String          @id @default(uuid())
-  userId      String
-  walletId    String
-  amount      Int
-  type        TransactionType
-  description String
-  referenceId String?
-  metadata    Json            @default("{}")
-  balanceAfter Int
-
-  createdAt DateTime @default(now())
-
-  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  wallet CreditWallet @relation(fields: [walletId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([walletId])
-  @@map("credit_transactions")
-}
-
-model PricingRule {
-  id          String  @id @default(uuid())
-  name        String
-  slug        String  @unique
-  description String?
-  actionType  String
-  modelSlug   String?
-  planSlug    String?
-  creditCost  Int
-  isEnabled   Boolean @default(true)
-  metadata    Json    @default("{}")
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  @@index([slug])
-  @@index([actionType])
-  @@map("pricing_rules")
-}
-
-// ─── Plans & Subscriptions ────────────────────────────────────────────────────
-
-model Plan {
-  id                    String   @id @default(uuid())
-  name                  String
-  slug                  String   @unique
-  description           String?
-  monthlyPrice          Int      @default(0)
-  yearlyPrice           Int      @default(0)
-  monthlyCredits        Int      @default(0)
-  companionLimit        Int      @default(1)
-  memoryLimitTokens     Int      @default(4000)
-  features              Json     @default("[]")
-  limits                Json     @default("{}")
-  modelTier             String   @default("standard")
-  isActive              Boolean  @default(true)
-  sortOrder             Int      @default(0)
-  stripeProductId       String?
-  stripePriceIdMonthly  String?
-  stripePriceIdYearly   String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  subscriptions Subscription[]
-
-  @@map("plans")
-}
-
-model Subscription {
-  id                   String             @id @default(uuid())
-  userId               String
-  planId               String
-  status               SubscriptionStatus @default(ACTIVE)
-  currentPeriodStart   DateTime           @default(now())
-  currentPeriodEnd     DateTime?
-  cancelAtPeriodEnd    Boolean            @default(false)
-  canceledAt           DateTime?
-  stripeSubscriptionId String?            @unique
-  stripeCustomerId     String?
-  metadata             Json               @default("{}")
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  plan Plan @relation(fields: [planId], references: [id])
-
-  @@index([userId])
-  @@map("subscriptions")
-}
-
-// ─── AI Providers & Models ────────────────────────────────────────────────────
-
-model AiProvider {
-  id           String  @id @default(uuid())
-  name         String
-  slug         String  @unique
-  description  String?
-  baseUrl      String?
-  providerType String  @default("CHAT")
-  authType     String  @default("api_key")
-  secretKeyRef String?
-  isEnabled    Boolean @default(true)
-  settings     Json    @default("{}")
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  models AiModel[]
-
-  @@map("ai_providers")
-}
-
-model AiModel {
-  id              String    @id @default(uuid())
-  providerId      String
-  name            String
-  slug            String    @unique
-  description     String?
-  modelType       ModelType
-  externalModelId String
-  capabilities    Json      @default("{}")
-  inputSchema     Json      @default("{}")
-  outputSchema    Json      @default("{}")
-  supportsStreaming Boolean  @default(false)
-  supportsAsync    Boolean  @default(false)
-  safetyTier       String   @default("standard")
-  isEnabled        Boolean  @default(true)
-  settings         Json     @default("{}")
-  creditCostPerCall Int     @default(1)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  provider      AiProvider     @relation(fields: [providerId], references: [id])
-  modelDefaults ModelDefault[]
-
-  @@index([modelType])
-  @@index([isEnabled])
-  @@map("ai_models")
-}
-
-model ModelDefault {
-  id        String    @id @default(uuid())
-  modelType ModelType @unique
-  modelId   String
-  setBy     String?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  model AiModel @relation(fields: [modelId], references: [id])
-
-  @@map("model_defaults")
-}
-
-// ─── Media Generations ────────────────────────────────────────────────────────
-
-model MediaGeneration {
-  id              String           @id @default(uuid())
-  userId          String
-  companionId     String?
-  conversationId  String?
-  type            MediaType
-  status          GenerationStatus @default(PENDING)
-  prompt          String           @db.Text
-  negativePrompt  String?          @db.Text
-  userRequest     String?          @db.Text
-  aspectRatio     String?
-  style           String?
-  durationSeconds Int?
-  modelSlug       String?
-  providerJobId   String?
-  storageKey      String?
-  storageUrl      String?
-  thumbnailUrl    String?
-  creditsUsed     Int              @default(0)
-  creditsReserved Int              @default(0)
-  reservationId   String?
-  metadata        Json             @default("{}")
-  errorMessage    String?
-  completedAt     DateTime?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  companion Companion? @relation(fields: [companionId], references: [id])
-
-  @@index([userId])
-  @@index([companionId])
-  @@index([status])
-  @@index([providerJobId])
-  @@map("media_generations")
-}
-
-// ─── Moderation ───────────────────────────────────────────────────────────────
-
-model ModerationEvent {
-  id           String           @id @default(uuid())
-  userId       String?
-  contentType  String
-  inputText    String           @db.Text
-  action       ModerationAction
-  flaggedTerms Json             @default("[]")
-  ruleMatched  String?
-  metadata     Json             @default("{}")
-  ipAddress    String?
-
-  createdAt DateTime @default(now())
-
-  user User? @relation(fields: [userId], references: [id])
-
-  @@index([userId])
-  @@index([action])
-  @@index([createdAt])
-  @@map("moderation_events")
-}
-
-// ─── Admin Audit Log ──────────────────────────────────────────────────────────
-
-model AdminAuditLog {
-  id         String @id @default(uuid())
-  adminId    String
-  action     String
-  targetType String?
-  targetId   String?
-  details    Json   @default("{}")
-  ipAddress  String?
-
-  createdAt DateTime @default(now())
-
-  admin User @relation(fields: [adminId], references: [id])
-
-  @@index([adminId])
-  @@index([targetType, targetId])
-  @@map("admin_audit_logs")
-}
-
-// ─── Credit Reservations ──────────────────────────────────────────────────────
-
-model CreditReservation {
-  id          String            @id @default(uuid())
-  userId      String
-  amount      Int
-  status      ReservationStatus @default(RESERVED)
-  source      String
-  sourceId    String?
-  finalizedAt DateTime?
-  refundedAt  DateTime?
-  expiresAt   DateTime?
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-  @@index([status])
-  @@index([sourceId])
-  @@map("credit_reservations")
-}
-
-// ─── Credit Packs ─────────────────────────────────────────────────────────────
-
-model CreditPack {
-  id             String  @id @default(uuid())
-  name           String
+// ─── Character Lookups (admin-editable seed data) ─────────────────────────────
+//
+// These live as tables (not Prisma enums) because product will iterate on the
+// list — new personalities, occupations, and voices get added without a
+// schema migration. Prompt fragments are stored server-side so the wizard
+// UI only ever sees display metadata.
+
+model PersonalityArchetype {
+  id             String  @id @default(uuid()) @db.Uuid
   slug           String  @unique
-  description    String?
-  credits        Int
-  bonusCredits   Int     @default(0)
-  price          Int
-  currency       String  @default("usd")
-  stripePriceId  String?
-  isEnabled      Boolean @default(true)
+  displayName    String
+  description    String  @db.Text
+  promptFragment String  @db.Text
+  icon           String?
   sortOrder      Int     @default(0)
+  isActive       Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@index([isEnabled])
-  @@map("credit_packs")
+  characters Character[]
+
+  @@index([isActive, sortOrder])
+  @@map("personality_archetypes")
 }
 
-// ─── App Settings ─────────────────────────────────────────────────────────────
-
-model AppSetting {
-  id          String  @id @default(uuid())
-  key         String  @unique
-  value       String  @db.Text
-  description String?
-  isPublic    Boolean @default(false)
+model RelationshipArchetype {
+  id             String  @id @default(uuid()) @db.Uuid
+  slug           String  @unique
+  displayName    String
+  description    String  @db.Text
+  promptFragment String  @db.Text
+  icon           String?
+  sortOrder      Int     @default(0)
+  isActive       Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@map("app_settings")
+  characters Character[]
+
+  @@index([isActive, sortOrder])
+  @@map("relationship_archetypes")
+}
+
+model CharacterOccupation {
+  id             String  @id @default(uuid()) @db.Uuid
+  slug           String  @unique
+  displayName    String
+  description    String? @db.Text
+  promptFragment String  @db.Text
+  icon           String?
+  isNsfwOnly     Boolean @default(false)
+  sortOrder      Int     @default(0)
+  isActive       Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  characters Character[]
+
+  @@index([isActive, sortOrder])
+  @@index([isNsfwOnly])
+  @@map("character_occupations")
+}
+
+model VoicePreset {
+  id              String        @id @default(uuid()) @db.Uuid
+  slug            String        @unique
+  displayName     String
+  tone            String
+  provider        VoiceProvider
+  providerVoiceId String
+  sampleR2Key     String?
+  language        String        @default("en")
+  sortOrder       Int           @default(0)
+  isActive        Boolean       @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  characters Character[]
+
+  @@index([isActive, sortOrder])
+  @@map("voice_presets")
+}
+
+// ─── Characters ───────────────────────────────────────────────────────────────
+
+model Character {
+  id          String @id @default(uuid()) @db.Uuid
+  ownerUserId String @db.Uuid
+
+  // Hard-tier identity — immutable after DRAFT → ACTIVE. Enforced in app layer.
+  name      String
+  birthdate DateTime @db.Date
+
+  // Wizard answers — appearance (screenshot 7 "Appearance" tab)
+  baseStyle BaseStyle
+  ethnicity Ethnicity
+  gender    Gender
+  ageYears  Int
+  eyeColor  EyeColor
+  hairStyle HairStyle
+  hairColor HairColor
+  bodyType  BodyType
+  bustSize  SizeTier?
+  hipSize   SizeTier?
+  clothing  String?
+
+  // Wizard answers — character (screenshot 7 "Character" tab)
+  personalityArchetypeId  String @db.Uuid
+  relationshipArchetypeId String @db.Uuid
+  occupationId            String @db.Uuid
+  voicePresetId           String @db.Uuid
+
+  // Behavioral sliders (product-research.md §2.3, 0–100 each)
+  flirtation     Int @default(50)
+  patience       Int @default(50)
+  moodVolatility Int @default(50)
+  dominance      Int @default(50)
+
+  // Discovery / classification
+  language String   @default("en")
+  hobbies  String[] @default([])
+  tags     String[] @default([])
+  nsfwOptIn Boolean @default(false)
+  tagline  String?
+  backstory String? @db.Text
+
+  // Compiled artifacts — regenerated whenever mutable answers change.
+  systemPrompt     String   @db.Text
+  appearancePrompt String   @db.Text
+  bio              String?  @db.Text
+  promptCompiledAt DateTime
+
+  // Lifecycle (screenshot 6 loading → screenshot 7 preview → "Bring my AI to Life")
+  status              CharacterStatus @default(DRAFT)
+  regenerationCount   Int             @default(0)
+  committedAt         DateTime?
+
+  // Moderation + visibility
+  visibility       CharacterVisibility       @default(PRIVATE)
+  moderationStatus CharacterModerationStatus @default(APPROVED)
+  featuredAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ownerUser              User                         @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  personalityArchetype   PersonalityArchetype         @relation(fields: [personalityArchetypeId], references: [id])
+  relationshipArchetype  RelationshipArchetype        @relation(fields: [relationshipArchetypeId], references: [id])
+  occupation             CharacterOccupation          @relation(fields: [occupationId], references: [id])
+  voicePreset            VoicePreset                  @relation(fields: [voicePresetId], references: [id])
+  appearanceProfiles     CharacterAppearanceProfile[]
+  editHistory            CharacterEditHistory[]
+
+  // Chat + memory back-relations
+  conversations          Conversation[]
+  memoryFacts            MemoryFact[]
+  relationshipStates     RelationshipState[]
+  relationshipMilestones RelationshipMilestone[]
+
+  @@index([ownerUserId])
+  @@index([ownerUserId, status])
+  @@index([visibility, moderationStatus])
+  @@index([featuredAt])
+  @@map("characters")
+}
+
+model CharacterAppearanceProfile {
+  id          String @id @default(uuid()) @db.Uuid
+  characterId String @db.Uuid
+  version     Int
+
+  appearancePrompt String @db.Text
+
+  referenceImageR2Key String?
+  // Face embedding — 512-dim vector for identity-lock similarity search.
+  // Prisma has no first-class type for pgvector; `Unsupported` marks the
+  // column as inaccessible to the Prisma client, and we query it via raw SQL.
+  faceEmbedding       Unsupported("vector(512)")?
+  faceKeypoints       Json?
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  @@unique([characterId, version])
+  @@index([characterId, isActive])
+  @@map("character_appearance_profiles")
+}
+
+model CharacterEditHistory {
+  id           String  @id @default(uuid()) @db.Uuid
+  characterId  String  @db.Uuid
+  editorUserId String  @db.Uuid
+  tier         ConstraintTier
+  fieldName    String
+  oldValue     Json?
+  newValue     Json?
+  reason       String?
+
+  createdAt DateTime @default(now())
+
+  character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  editor    User      @relation("CharacterEditor", fields: [editorUserId], references: [id], onDelete: Cascade)
+
+  @@index([characterId, createdAt])
+  @@index([editorUserId])
+  @@map("character_edit_history")
 }
 
 // ─── Enums ────────────────────────────────────────────────────────────────────
@@ -595,15 +349,202 @@ enum UserStatus {
   PENDING_VERIFICATION
 }
 
-enum CompanionStatus {
-  ACTIVE
-  ARCHIVED
-  DRAFT
+enum BaseStyle {
+  REALISTIC
+  ANIME
+  THREE_D
+  CARTOON
 }
 
-enum ConversationStatus {
+enum Ethnicity {
+  CAUCASIAN
+  LATINA
+  ASIAN
+  ARAB
+  EBONY
+  MIXED
+  OTHER
+}
+
+enum Gender {
+  FEMALE
+  MALE
+  NONBINARY
+}
+
+enum EyeColor {
+  BROWN
+  BLUE
+  GREEN
+  HAZEL
+  AMBER
+  GRAY
+  VIOLET
+  HETEROCHROMIA
+}
+
+enum HairStyle {
+  STRAIGHT
+  WAVY
+  CURLY
+  BANGS
+  PONYTAIL
+  BOB
+  PIXIE
+  BRAIDS
+  UPDO
+}
+
+enum HairColor {
+  BLACK
+  BROWN
+  BLONDE
+  RED
+  AUBURN
+  WHITE
+  SILVER
+  PINK
+  PURPLE
+  BLUE
+  FANTASY_OTHER
+}
+
+enum BodyType {
+  SLIM
+  ATHLETIC
+  CURVY
+  PLUS_SIZE
+  PETITE
+  VOLUPTUOUS
+}
+
+enum SizeTier {
+  XS
+  S
+  M
+  L
+  XL
+}
+
+enum CharacterStatus {
+  DRAFT
   ACTIVE
   ARCHIVED
+}
+
+enum CharacterVisibility {
+  PRIVATE
+  UNLISTED
+  PUBLIC
+}
+
+enum CharacterModerationStatus {
+  APPROVED
+  UNDER_REVIEW
+  BLOCKED
+}
+
+enum VoiceProvider {
+  MOCK_TTS
+  ELEVENLABS
+  OPENAI_REALTIME
+  CARTESIA
+  PLAYHT
+}
+
+enum ConstraintTier {
+  HARD
+  TEMPORAL
+  SOFT
+  EMERGENT
+}
+
+// ─── Model Configuration (admin-tunable at runtime) ───────────────────────────
+//
+// Model IDs, endpoints, and per-model parameters live in Postgres — never in
+// `.env` — so admins can swap chat/extractor/image models at runtime without
+// a redeploy. Every LLM/image adapter resolves its model via this table.
+
+model ModelConfig {
+  id              String        @id @default(uuid()) @db.Uuid
+  purpose         ModelPurpose  @unique
+  provider        ModelProvider
+  modelId         String
+  endpoint        String?
+  parameters      Json          @default("{}")
+  label           String
+  notes           String?       @db.Text
+  isActive        Boolean       @default(true)
+  updatedByUserId String?       @db.Uuid
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  updatedBy User? @relation("ModelConfigUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([purpose, isActive])
+  @@map("model_configs")
+}
+
+enum ModelPurpose {
+  CHAT
+  EXTRACTOR
+  SUMMARIZER
+  IMAGE_TEXT_TO_IMAGE
+  IMAGE_IMAGE_TO_IMAGE
+  VIDEO_IMAGE_TO_VIDEO
+  EMBEDDING
+}
+
+enum ModelProvider {
+  OPENROUTER
+  OPENAI
+  ANTHROPIC
+  FAL
+}
+
+// ─── Chat ─────────────────────────────────────────────────────────────────────
+
+model Conversation {
+  id            String   @id @default(uuid()) @db.Uuid
+  userId        String   @db.Uuid
+  characterId   String   @db.Uuid
+  title         String?
+  lastMessageAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character Character            @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  summary   ConversationSummary?
+
+  @@unique([userId, characterId])
+  @@index([userId, lastMessageAt(sort: Desc)])
+  @@map("conversations")
+}
+
+model Message {
+  id             String        @id @default(uuid()) @db.Uuid
+  conversationId String        @db.Uuid
+  role           MessageRole
+  status         MessageStatus @default(READY)
+  content        String        @db.Text
+  tokensIn       Int?
+  tokensOut      Int?
+  // Snapshot of the ModelConfig.modelId that produced this row. Kept even if
+  // an admin later swaps the active model, so history stays honest.
+  modelId        String?
+  errorMessage   String?
+
+  createdAt DateTime @default(now())
+
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  extractedFacts MemoryFact[]
+
+  @@index([conversationId, createdAt])
+  @@map("messages")
 }
 
 enum MessageRole {
@@ -612,54 +553,112 @@ enum MessageRole {
   SYSTEM
 }
 
-enum TransactionType {
-  CREDIT_PURCHASE
-  CREDIT_GRANT
-  CREDIT_DEDUCTION
-  CREDIT_REFUND
-  CREDIT_RESERVATION
-  CREDIT_RESERVATION_FINALIZE
-  CREDIT_RESERVATION_REFUND
-  SUBSCRIPTION_GRANT
-}
-
-enum ReservationStatus {
-  RESERVED
-  FINALIZED
-  REFUNDED
-  EXPIRED
-}
-
-enum SubscriptionStatus {
-  ACTIVE
-  CANCELED
-  PAST_DUE
-  TRIALING
-  INCOMPLETE
-}
-
-enum ModelType {
-  CHAT
-  IMAGE
-  VIDEO
-}
-
-enum MediaType {
-  IMAGE
-  VIDEO
-}
-
-enum GenerationStatus {
-  QUEUED
-  PENDING
-  PROCESSING
-  COMPLETED
+enum MessageStatus {
+  READY
   FAILED
 }
 
-enum ModerationAction {
-  BLOCKED
-  FLAGGED
-  ALLOWED
-  AUTO_MODIFIED
+model ConversationSummary {
+  id             String @id @default(uuid()) @db.Uuid
+  conversationId String @unique @db.Uuid
+  summary        String @db.Text
+  turnsCovered   Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@map("conversation_summaries")
+}
+
+// ─── Memory (Layer 2 + Layer 3a) ──────────────────────────────────────────────
+
+model MemoryFact {
+  id              String         @id @default(uuid()) @db.Uuid
+  userId          String         @db.Uuid
+  characterId     String?        @db.Uuid
+  content         String         @db.Text
+  category        MemoryCategory
+  valence         Float          @default(0)
+  confidence      Float          @default(0.8)
+  sourceMessageId String?        @db.Uuid
+  entities        String[]       @default([])
+  metadata        Json           @default("{}")
+
+  // 1024-dim embedding column ships now (nullable, no HNSW index yet). The
+  // embedder + backfill + `CREATE INDEX` land as a follow-up migration.
+  embedding Unsupported("vector(1024)")?
+
+  extractedAt DateTime  @default(now())
+  expiresAt   DateTime?
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character Character? @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  sourceMsg Message?   @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
+
+  @@map("memory_facts")
+}
+
+enum MemoryCategory {
+  IDENTITY
+  PREFERENCE
+  RELATIONSHIP
+  EVENT
+  PLAN
+  EMOTION
+  OPINION
+  COMMITMENT
+  OTHER
+}
+
+model RelationshipState {
+  id                String           @id @default(uuid()) @db.Uuid
+  userId            String           @db.Uuid
+  characterId       String           @db.Uuid
+  trust             Float            @default(50)
+  affection         Float            @default(50)
+  respect           Float            @default(50)
+  familiarity       Float            @default(0)
+  tension           Float            @default(0)
+  affinity          Float            @default(0)
+  tier              RelationshipTier @default(STRANGER)
+  lastInteractionAt DateTime         @default(now())
+  totalMessages     Int              @default(0)
+  streakDays        Int              @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, characterId])
+  @@map("relationship_states")
+}
+
+enum RelationshipTier {
+  STRANGER
+  ACQUAINTANCE
+  FRIEND
+  CLOSE_FRIEND
+  ROMANTIC_INTEREST
+  PARTNER
+  SOULMATE
+}
+
+model RelationshipMilestone {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  characterId String   @db.Uuid
+  type        String
+  content     String   @db.Text
+  metadata    Json     @default("{}")
+  occurredAt  DateTime @default(now())
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  @@index([userId, characterId, occurredAt(sort: Desc)])
+  @@map("relationship_milestones")
 }
