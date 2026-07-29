@@ -46,6 +46,12 @@ export class BuildChatContextUseCase {
     actorUserId: string;
     conversationId: string;
     latestUserMessage: string;
+    /**
+     * Optional — passed through to the memory module as a fallback name
+     * so the model can greet the user by name from turn one, even before
+     * fact extraction has captured it.
+     */
+    actorDisplayName?: string | null;
   }): Promise<BuiltChatContext> {
     const conv = await this.conversations.findById(input.conversationId);
     if (!conv) throw new ConversationNotFoundError(input.conversationId);
@@ -70,6 +76,7 @@ export class BuildChatContextUseCase {
         characterId: conv.characterId,
         conversationId: conv.id,
         userMessage: input.latestUserMessage,
+        userDisplayName: input.actorDisplayName ?? null,
       }),
     ]);
 

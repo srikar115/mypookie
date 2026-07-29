@@ -39,6 +39,7 @@ export class PrismaCharacterRepository implements CharacterRepository {
         bustSize: p.appearance.bustSize ?? undefined,
         hipSize: p.appearance.hipSize ?? undefined,
         clothing: p.appearance.clothing ?? undefined,
+        fashionStyle: p.appearance.fashionStyle ?? undefined,
         personalityArchetypeId: p.personality.personalityArchetypeId,
         relationshipArchetypeId: p.personality.relationshipArchetypeId,
         occupationId: p.personality.occupationId,
@@ -80,6 +81,73 @@ export class PrismaCharacterRepository implements CharacterRepository {
     });
   }
 
+  async updateTagline(input: {
+    characterId: string;
+    tagline: string;
+  }): Promise<void> {
+    // Mirror into `bio` — the two fields serve the same UX purpose (short
+    // scenario copy shown to the user); keeping them in sync means the
+    // chat sidebar and the My AI gallery never disagree.
+    await this.db.character.update({
+      where: { id: input.characterId },
+      data: {
+        tagline: input.tagline,
+        bio: input.tagline,
+      },
+    });
+  }
+
+  async findTaglineInputById(characterId: string): Promise<{
+    ownerUserId: string;
+    name: string;
+    ageYears: number;
+    baseStyle: string;
+    ethnicity: string;
+    gender: string;
+    hobbies: readonly string[];
+    backstory: string | null;
+    language: string;
+    nsfwOptIn: boolean;
+    personalityLabel: string;
+    relationshipLabel: string;
+    occupationLabel: string;
+  } | null> {
+    const row = await this.db.character.findUnique({
+      where: { id: characterId },
+      select: {
+        ownerUserId: true,
+        name: true,
+        ageYears: true,
+        baseStyle: true,
+        ethnicity: true,
+        gender: true,
+        hobbies: true,
+        backstory: true,
+        language: true,
+        nsfwOptIn: true,
+        personalityArchetype: { select: { displayName: true } },
+        relationshipArchetype: { select: { displayName: true } },
+        occupation: { select: { displayName: true } },
+      },
+    });
+    if (!row) return null;
+    return {
+      ownerUserId: row.ownerUserId,
+      name: row.name,
+      ageYears: row.ageYears,
+      baseStyle: row.baseStyle,
+      ethnicity: row.ethnicity,
+      gender: row.gender,
+      hobbies: [...row.hobbies],
+      backstory: row.backstory,
+      language: row.language,
+      nsfwOptIn: row.nsfwOptIn,
+      personalityLabel: row.personalityArchetype.displayName,
+      relationshipLabel: row.relationshipArchetype.displayName,
+      occupationLabel: row.occupation.displayName,
+    };
+  }
+
   async findById(id: string): Promise<Character | null> {
     const row = await this.db.character.findUnique({ where: { id } });
     if (!row) return null;
@@ -99,6 +167,7 @@ export class PrismaCharacterRepository implements CharacterRepository {
         bustSize: row.bustSize,
         hipSize: row.hipSize,
         clothing: row.clothing,
+        fashionStyle: row.fashionStyle,
       },
       personality: {
         personalityArchetypeId: row.personalityArchetypeId,
@@ -170,6 +239,7 @@ export class PrismaCharacterRepository implements CharacterRepository {
         bustSize: row.bustSize,
         hipSize: row.hipSize,
         clothing: row.clothing,
+        fashionStyle: row.fashionStyle,
       },
       personality: {
         personalityArchetypeId: row.personalityArchetypeId,

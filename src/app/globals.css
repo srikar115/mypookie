@@ -150,6 +150,16 @@
   100% { transform: translateX(200%); width: 40%; }
 }
 
+/*
+ * Chat typing indicator — three dots that ease up and down with a
+ * staggered delay to feel like a real "…" being pushed forward. Amplitude
+ * is small (2px) so the row height stays constant.
+ */
+@keyframes typing-dot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+  30%           { transform: translateY(-2px); opacity: 1; }
+}
+
 .animate-fade-in {
   animation: fadeIn 0.4s ease-out;
 }
@@ -160,4 +170,8 @@
 
 .animate-float {
   animation: float 3s ease-in-out infinite;
+}
+
+.animate-typing-dot {
+  animation: typing-dot 1.2s ease-in-out infinite;
 }

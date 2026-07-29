@@ -26,6 +26,38 @@ export interface CharacterRepository {
   /** Update mutable state (status, regenerationCount, committedAt). */
   update(character: Character): Promise<void>;
 
+  /**
+   * Overwrites the scenario copy on an existing character. Called by the
+   * `RegenerateCharacterTagline` use case (and any future admin flow).
+   * Mirrors the same text into `characters.bio` so the "My AI" gallery
+   * card stays in sync with the chat sidebar.
+   */
+  updateTagline(input: {
+    characterId: string;
+    tagline: string;
+  }): Promise<void>;
+
+  /**
+   * Compact projection needed by RegenerateCharacterTagline — avoids
+   * loading the full Character entity + rehydrating value objects just to
+   * hand a few strings to the LLM.
+   */
+  findTaglineInputById(characterId: string): Promise<{
+    ownerUserId: string;
+    name: string;
+    ageYears: number;
+    baseStyle: string;
+    ethnicity: string;
+    gender: string;
+    hobbies: readonly string[];
+    backstory: string | null;
+    language: string;
+    nsfwOptIn: boolean;
+    personalityLabel: string;
+    relationshipLabel: string;
+    occupationLabel: string;
+  } | null>;
+
   /** Fetch a full domain entity (throws CharacterNotFoundError). */
   findById(id: string): Promise<Character | null>;
 

@@ -20,5 +20,11 @@ export interface MemoryContextProvider {
     characterId: string;
     conversationId: string;
     userMessage: string;
+    /**
+     * The user's auth-session display name (`session.user.name`), forwarded
+     * from the streaming route. Used as a fallback for USER PROFILE when
+     * memory hasn't captured the user's name yet. Nullable.
+     */
+    userDisplayName?: string | null;
   }): Promise<string>;
 }

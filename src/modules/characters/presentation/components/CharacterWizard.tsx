@@ -1,104 +1,119 @@
 "use client";
 
 import { useMemo, useState, useTransition } from "react";
-import { ArrowLeft, ArrowRight, Check } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { cn } from "@/shared/presentation/utils";
-import { usePublicShell } from "@/components/public/PublicShell";
-import { StyleStep } from "./steps/StyleStep";
-import { AppearanceStep } from "./steps/AppearanceStep";
-import { CharacterStep } from "./steps/CharacterStep";
+import { useRouter } from "next/navigation";
+import { WizardShell } from "./WizardShell";
 import { ProgressScreen } from "./ProgressScreen";
-import { PreviewScreen } from "./PreviewScreen";
 import {
-  deriveDraftFromCategory,
+  StepGender,
+  StepLook,
+  StepBond,
+  StepPersonality,
+  StepAge,
+  StepHeritage,
+  StepHair,
+  StepEyes,
+  StepBody,
+  StepFashion,
+  StepDetails,
+  buildPreviewIndex,
+} from "./wizard-steps";
+import {
   emptyDraft,
-  isAppearanceComplete,
-  isCharacterComplete,
+  isStepComplete,
+  WIZARD_STEP_ORDER,
+  bodyMeasurementsAllowed,
   type WizardDraft,
   type WizardStep,
 } from "./wizard-state";
 import { createCharacterDraftAction } from "../actions/create-draft.action";
+import { startOrLoadConversationAction } from "@/modules/chat/client";
+import { slugifyName } from "@/shared/presentation/utils";
 import type { CharacterLookupsDto } from "../../application/dto/lookups.dto";
-import type { CharacterDto } from "../../application/dto/character.dto";
+import type { WizardPreviewRow } from "../../application/ports/wizard-preview-repository";
 
 export interface CharacterWizardProps {
   lookups: CharacterLookupsDto;
-  /** Server action bound in the parent so the client stays framework-agnostic. */
-  fetchCharacter: (id: string) => Promise<CharacterDto | null>;
+  /** All preview rows for the whole table — filtered client-side. */
+  previews: readonly WizardPreviewRow[];
 }
 
 /**
- * CharacterWizard — the client orchestrator for the 3-step character
- * creation flow, followed by the async progress + preview screens.
+ * CharacterWizard — Candy.ai-style unified visual wizard (11 steps).
  *
- * State machine:
- *   style → appearance → character → progress → preview
+ * Step machine (order fixed in `WIZARD_STEP_ORDER`):
+ *   1  gender         → drives image gender presentation
+ *   2  look           → REALISTIC vs ANIME
+ *   3  bond           → picks relationship archetype slug
+ *   4  personality    → picks personality archetype slug
+ *   5  age            → 4 buckets, mapped to a concrete year
+ *   6  heritage       → picks Ethnicity
+ *   7  hair           → color + style on one page
+ *   8  eyes           → eye color
+ *   9  body           → body type + optional bust/hip (feminine presentations)
+ *  10  fashion        → FashionStyle preset + optional freeform clothing
+ *  11  details        → name / occupation / voice / hobbies / backstory / NSFW
  *
- * Only the `progress → preview` transition depends on a server round-trip
- * (createCharacterDraftAction). Everything before that is pure local state.
+ * After step 11: `progress` → server round-trip → `preview`.
+ *
+ * State ownership: draft is client-local, mutated via a single `patch()`
+ * merge. No fields are derived from any external context — this wizard
+ * is a pure island. The `previews` prop drives visual tiles; missing
+ * previews fall back to labels + emojis so the wizard is usable even
+ * before Phase 3's image seeder has run.
  */
-export function CharacterWizard({ lookups, fetchCharacter }: CharacterWizardProps) {
-  const { category } = usePublicShell();
-  const [step, setStep] = useState<WizardStep>("style");
-  const [draft, setDraft] = useState<WizardDraft>(() => ({
-    ...emptyDraft(),
-    ...deriveDraftFromCategory(category),
-  }));
-  // Track the last category we synced with so we can re-derive baseStyle +
-  // gender during render if the user switches tabs mid-wizard. This follows
-  // React's "adjusting state on prop change" pattern (setState during render
-  // triggers an immediate re-render without an intervening paint) and avoids
-  // the setState-in-effect anti-pattern that useEffect would introduce.
-  const [syncedCategory, setSyncedCategory] = useState(category);
-  if (syncedCategory !== category) {
-    setSyncedCategory(category);
-    const derived = deriveDraftFromCategory(category);
-    setDraft((prev) => ({
-      ...prev,
-      ...derived,
-      bustSize: derived.gender === "FEMALE" ? prev.bustSize : null,
-      hipSize: derived.gender === "FEMALE" ? prev.hipSize : null,
-    }));
-  }
-  const [character, setCharacter] = useState<CharacterDto | null>(null);
+export function CharacterWizard({
+  lookups,
+  previews: previewRows,
+}: CharacterWizardProps) {
+  const router = useRouter();
+  const [step, setStep] = useState<WizardStep>("gender");
+  const [draft, setDraft] = useState<WizardDraft>(() => emptyDraft());
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, startSubmit] = useTransition();
 
   const patch = (p: Partial<WizardDraft>) =>
     setDraft((prev) => ({ ...prev, ...p }));
 
-  const stepIndex = useMemo(() => {
-    if (step === "style") return 0;
-    if (step === "appearance") return 1;
-    if (step === "character") return 2;
-    return 3;
-  }, [step]);
+  // Preview index rebuilt only when the (baseStyle, gender) filter
+  // changes — most tile renders don't allocate anything new.
+  const previews = useMemo(
+    () => buildPreviewIndex(previewRows, draft.baseStyle, draft.gender),
+    [previewRows, draft.baseStyle, draft.gender],
+  );
 
-  const canProceed = useMemo(() => {
-    if (step === "style") {
-      // baseStyle + gender are auto-derived from the top-nav category, so
-      // the only user-facing requirement on step 1 is ethnicity.
-      return draft.ethnicity !== null;
-    }
-    if (step === "appearance") {
-      return isAppearanceComplete(draft);
-    }
-    if (step === "character") {
-      return isCharacterComplete(draft);
-    }
-    return false;
+  const stepIndex = WIZARD_STEP_ORDER.indexOf(
+    step as (typeof WIZARD_STEP_ORDER)[number],
+  );
+  const isFirstVisualStep = stepIndex === 0;
+  const isLastVisualStep = stepIndex === WIZARD_STEP_ORDER.length - 1;
+
+  const canContinue = useMemo(() => {
+    if (step === "progress" || step === "preview") return false;
+    const check = isStepComplete[step];
+    return check ? check(draft) : false;
   }, [step, draft]);
 
   const goBack = () => {
-    if (step === "appearance") setStep("style");
-    else if (step === "character") setStep("appearance");
+    if (stepIndex <= 0) return;
+    setStep(WIZARD_STEP_ORDER[stepIndex - 1]);
+    setError(null);
   };
 
   const goNext = () => {
-    if (step === "style") setStep("appearance");
-    else if (step === "appearance") setStep("character");
-    else if (step === "character") submit();
+    if (step === "details") {
+      submit();
+      return;
+    }
+    // Sanity: whenever the user re-enters the body step under a
+    // masculine presentation, blow away any previously-set bust/hip
+    // so the payload doesn't leak stale measurements.
+    if (step === "body" && !bodyMeasurementsAllowed(draft.gender)) {
+      setDraft((d) => ({ ...d, bustSize: null, hipSize: null }));
+    }
+    if (stepIndex >= 0 && stepIndex < WIZARD_STEP_ORDER.length - 1) {
+      setStep(WIZARD_STEP_ORDER[stepIndex + 1]);
+    }
   };
 
   const submit = () =>
@@ -108,22 +123,24 @@ export function CharacterWizard({ lookups, fetchCharacter }: CharacterWizardProp
       const payload = {
         name: draft.name,
         appearance: {
-          baseStyle: draft.baseStyle,
-          ethnicity: draft.ethnicity,
-          gender: draft.gender,
+          baseStyle: draft.baseStyle!,
+          ethnicity: draft.ethnicity!,
+          gender: draft.gender!,
           ageYears: draft.ageYears,
-          eyeColor: draft.eyeColor,
-          hairStyle: draft.hairStyle,
-          hairColor: draft.hairColor,
-          bodyType: draft.bodyType,
+          eyeColor: draft.eyeColor!,
+          hairStyle: draft.hairStyle!,
+          hairColor: draft.hairColor!,
+          bodyType: draft.bodyType!,
           bustSize: draft.bustSize,
           hipSize: draft.hipSize,
-          clothing: draft.clothing.trim().length > 0 ? draft.clothing.trim() : null,
+          clothing:
+            draft.clothing.trim().length > 0 ? draft.clothing.trim() : null,
+          fashionStyle: draft.fashionStyle,
         },
-        personalitySlug: draft.personalitySlug,
-        relationshipSlug: draft.relationshipSlug,
-        occupationSlug: draft.occupationSlug,
-        voiceSlug: draft.voiceSlug,
+        personalitySlug: draft.personalitySlug!,
+        relationshipSlug: draft.relationshipSlug!,
+        occupationSlug: draft.occupationSlug!,
+        voiceSlug: draft.voiceSlug!,
         hobbies: draft.hobbies,
         language: draft.language,
         nsfwOptIn: draft.nsfwOptIn,
@@ -133,132 +150,139 @@ export function CharacterWizard({ lookups, fetchCharacter }: CharacterWizardProp
       const res = await createCharacterDraftAction(payload);
       if (!res.ok) {
         setError(res.error);
-        setStep("character");
+        setStep("details");
         return;
       }
-      const fetched = await fetchCharacter(res.characterId);
-      if (!fetched) {
-        setError(
-          "Character created but we couldn't load its preview. Try refreshing.",
-        );
-        setStep("character");
+
+      // Candy.ai-style handoff: open (or lazily create) the single
+      // conversation for this (user, character) pair and take the user
+      // straight to the chat. The preview screen is intentionally
+      // skipped — companions come to life inside the chat window, not
+      // on a static preview page.
+      const convo = await startOrLoadConversationAction({
+        characterId: res.characterId,
+      });
+      if (!convo.ok) {
+        setError(convo.error);
+        setStep("details");
         return;
       }
-      setCharacter(fetched);
-      setStep("preview");
+      const slug = slugifyName(draft.name);
+      router.push(
+        `/ai-girlfriend/${slug}?conversation_id=${convo.conversation.id}`,
+      );
     });
 
   if (step === "progress") {
     return <ProgressScreen name={draft.name} />;
   }
 
-  if (step === "preview" && character) {
-    return (
-      <div className="max-w-6xl mx-auto px-4 md:px-6 lg:px-8 py-10">
-        <PreviewScreen
-          characterId={character.id}
-          characterName={character.name}
-          initialImageUrl={character.imageUrl}
-          initialRegenerationsRemaining={character.regenerationsRemaining}
-          summary={{
-            personality: character.personality.personalityLabel,
-            relationship: character.personality.relationshipLabel,
-            occupation: character.personality.occupationLabel,
-            hobbies: character.hobbies,
-            bio: character.bio,
-          }}
+  // Both `progress` and `preview` are handled by the early-returns
+  // above; the terminal-state branches never fall through to the shell.
+  // TS still needs a concrete narrow because it can't prove the negative
+  // from an if-return chain — hence the explicit cast.
+  const visualStep = step as Exclude<WizardStep, "progress" | "preview">;
+  const stepCopy = STEP_COPY[visualStep];
+
+  return (
+    <WizardShell
+      step={visualStep}
+      title={stepCopy.title}
+      subtitle={stepCopy.subtitle}
+      onBack={goBack}
+      onContinue={goNext}
+      canContinue={canContinue}
+      isSubmitting={isSubmitting}
+      isFirst={isFirstVisualStep}
+      isLast={isLastVisualStep}
+      error={error}
+    >
+      {step === "gender" ? (
+        <StepGender draft={draft} patch={patch} previews={previews} />
+      ) : step === "look" ? (
+        <StepLook draft={draft} patch={patch} previews={previews} />
+      ) : step === "bond" ? (
+        <StepBond
+          draft={draft}
+          patch={patch}
+          previews={previews}
+          relationships={lookups.relationships}
         />
-      </div>
-    );
-  }
-
-  return (
-    <div className="max-w-3xl mx-auto px-4 md:px-6 lg:px-8 py-8 md:py-10">
-      <Stepper current={stepIndex} />
-
-      <div className="mt-8">
-        {step === "style" ? (
-          <StyleStep draft={draft} onPatch={patch} />
-        ) : step === "appearance" ? (
-          <AppearanceStep draft={draft} onPatch={patch} />
-        ) : (
-          <CharacterStep draft={draft} onPatch={patch} lookups={lookups} />
-        )}
-      </div>
-
-      {error ? (
-        <div className="mt-6 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm px-4 py-3">
-          {error}
-        </div>
-      ) : null}
-
-      <div className="mt-8 flex items-center justify-between sticky bottom-0 bg-[#0a0a0f] pb-4 pt-4 border-t border-[#1a1a26] -mx-4 md:-mx-6 lg:-mx-8 px-4 md:px-6 lg:px-8">
-        <Button
-          variant="ghost"
-          onClick={goBack}
-          disabled={step === "style" || isSubmitting}
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back
-        </Button>
-        <Button
-          size="lg"
-          onClick={goNext}
-          disabled={!canProceed || isSubmitting}
-          isLoading={isSubmitting}
-        >
-          {step === "character" ? "Create Character" : "Next"}
-          {step !== "character" ? <ArrowRight className="h-4 w-4" /> : null}
-        </Button>
-      </div>
-    </div>
+      ) : step === "personality" ? (
+        <StepPersonality
+          draft={draft}
+          patch={patch}
+          previews={previews}
+          personalities={lookups.personalities}
+        />
+      ) : step === "age" ? (
+        <StepAge draft={draft} patch={patch} previews={previews} />
+      ) : step === "heritage" ? (
+        <StepHeritage draft={draft} patch={patch} previews={previews} />
+      ) : step === "hair" ? (
+        <StepHair draft={draft} patch={patch} previews={previews} />
+      ) : step === "eyes" ? (
+        <StepEyes draft={draft} patch={patch} previews={previews} />
+      ) : step === "body" ? (
+        <StepBody draft={draft} patch={patch} previews={previews} />
+      ) : step === "fashion" ? (
+        <StepFashion draft={draft} patch={patch} previews={previews} />
+      ) : (
+        <StepDetails draft={draft} patch={patch} lookups={lookups} />
+      )}
+    </WizardShell>
   );
 }
 
-function Stepper({ current }: { current: number }) {
-  const labels = ["Style", "Appearance", "Character"];
-  return (
-    <ol className="flex items-center gap-3">
-      {labels.map((label, i) => {
-        const active = i === current;
-        const done = i < current;
-        return (
-          <li key={label} className="flex items-center gap-3">
-            <div
-              className={cn(
-                "flex items-center justify-center h-9 w-9 rounded-full text-sm font-semibold transition-colors",
-                done
-                  ? "bg-purple-500 text-white"
-                  : active
-                    ? "bg-white text-black"
-                    : "bg-[#1a1a26] text-[#5a5a66]",
-              )}
-            >
-              {done ? <Check className="h-4 w-4" /> : i + 1}
-            </div>
-            <span
-              className={cn(
-                "text-sm font-medium hidden sm:inline",
-                active
-                  ? "text-white"
-                  : done
-                    ? "text-[#c4c2d4]"
-                    : "text-[#5a5a66]",
-              )}
-            >
-              {label}
-            </span>
-            {i < labels.length - 1 ? (
-              <div
-                className={cn(
-                  "h-px w-8 md:w-16 transition-colors",
-                  done ? "bg-purple-500" : "bg-[#26263a]",
-                )}
-              />
-            ) : null}
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
+// ─── Step titles + subtitles ─────────────────────────────────────────────
+// Kept as a static map (over a switch) so it's obvious what copy each
+// step shows and translation extraction can grep it directly later.
+
+const STEP_COPY: Record<
+  Exclude<WizardStep, "progress" | "preview">,
+  { title: string; subtitle?: string }
+> = {
+  gender: {
+    title: "Gender",
+    subtitle: "How should we present your companion?",
+  },
+  look: {
+    title: "Pick a look",
+    subtitle: "Realistic photo or animated illustration.",
+  },
+  bond: {
+    title: "What kind of bond?",
+    subtitle: "Tap to choose.",
+  },
+  personality: {
+    title: "How do they feel?",
+    subtitle: "Pick a personality that fits the vibe.",
+  },
+  age: {
+    title: "Age range",
+  },
+  heritage: {
+    title: "Their look",
+    subtitle: "Pick what feels right — you can tweak the portrait after.",
+  },
+  hair: {
+    title: "Hair",
+    subtitle: "Colour first, then a style.",
+  },
+  eyes: {
+    title: "Eyes",
+    subtitle: "The little detail that pulls a portrait together.",
+  },
+  body: {
+    title: "Body",
+    subtitle: "Choose a build that fits how you picture them.",
+  },
+  fashion: {
+    title: "Fashion",
+    subtitle: "The wardrobe we'll draw from when generating portraits.",
+  },
+  details: {
+    title: "Finish them off",
+    subtitle: "Name, occupation, voice, and any extras.",
+  },
+};

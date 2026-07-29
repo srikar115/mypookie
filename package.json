@@ -10,7 +10,9 @@
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:seed": "tsx prisma/seed.ts",
-    "db:studio": "prisma studio"
+    "db:studio": "prisma studio",
+    "seed:wizard-previews": "node scripts/seed-wizard-previews.mjs",
+    "seed:wizard-previews:full": "node scripts/seed-wizard-previews.mjs --matrix full --concurrency 4"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -46,6 +48,7 @@
     "date-fns": "^4.1.0",
     "embla-carousel-autoplay": "^8.6.0",
     "embla-carousel-react": "^8.6.0",
+    "emoji-regex": "^10.6.0",
     "framer-motion": "^12.42.2",
     "ioredis": "^5.11.1",
     "lucide-react": "^1.16.0",

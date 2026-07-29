@@ -16,6 +16,199 @@ import type {
  *
  * Users who fill in the wizard's clothing field always override the default.
  */
+/**
+ * Human-readable label per DB enum value. Injecting `ethnicity.toLowerCase()`
+ * directly into the image prompt produced ugly outputs like
+ * `"east_asian woman"` — the tokenizer treats underscores as separators
+ * and downstream retrieval logs render awkwardly. This map is the single
+ * source of truth; add new enum values here alongside the schema change.
+ *
+ * Legacy values are kept 1:1 with their old presentation so any pre-v2
+ * data still renders identically to before.
+ */
+const ETHNICITY_LABEL: Record<string, string> = {
+  CAUCASIAN: "caucasian",
+  LATINA: "latina",
+  ASIAN: "asian",
+  ARAB: "arab",
+  EBONY: "ebony",
+  MIXED: "mixed-heritage",
+  OTHER: "",
+  EAST_ASIAN: "east asian",
+  SOUTHEAST_ASIAN: "southeast asian",
+  SOUTH_ASIAN: "south asian",
+  MIDDLE_EASTERN: "middle eastern",
+  NORTH_AFRICAN: "north african",
+  BLACK: "black",
+  CARIBBEAN: "afro-caribbean",
+  EUROPEAN: "european",
+};
+
+/**
+ * Maps a DB Gender enum to the presented-gender noun for image prompts.
+ * Trans identities present as their identified gender in generated
+ * portraits — that matches Candy's UX and avoids the image model
+ * misinterpreting the label as a costume/style directive.
+ */
+const GENDER_NOUN: Record<string, string> = {
+  FEMALE: "woman",
+  MALE: "man",
+  NONBINARY: "person",
+  TRANS_WOMAN: "woman",
+  TRANS_MAN: "man",
+};
+
+/**
+ * Which side of the gendered wardrobe pool to draw from when the caller
+ * hasn't picked a FashionStyle. Nonbinary is its own bucket; trans values
+ * inherit their presented-gender pool by design.
+ */
+const GENDER_POOL_KEY: Record<string, "FEMALE" | "MALE" | "NONBINARY"> = {
+  FEMALE: "FEMALE",
+  MALE: "MALE",
+  NONBINARY: "NONBINARY",
+  TRANS_WOMAN: "FEMALE",
+  TRANS_MAN: "MALE",
+};
+
+/**
+ * Wardrobe fragments keyed by FashionStyle × pool-key (feminine / masculine
+ * / neutral). When the wizard emits `fashionStyle`, these override the
+ * base-style-keyed CLOTHING_POOLS below. Pools are curated so a single
+ * random pick lands on a coherent look inside the style.
+ */
+const FASHION_POOLS: Record<string, Record<string, readonly string[]>> = {
+  CASUAL_CHIC: {
+    FEMALE: [
+      "a fitted white t-shirt tucked into high-waisted mom jeans and clean white sneakers",
+      "a cream silk blouse tucked into a pleated midi skirt with block heels",
+      "an oversized beige blazer over a ribbed tank and tailored trousers",
+      "a soft knit sweater and slim straight-leg jeans with loafers",
+    ],
+    MALE: [
+      "a crisp white oxford shirt rolled at the sleeves over slim navy chinos",
+      "a soft grey henley, tailored dark jeans, and clean white leather sneakers",
+      "a fitted cashmere polo tucked into cream trousers with brown loafers",
+      "a sky-blue linen shirt open over a plain tee and stone-washed denim",
+    ],
+    NONBINARY: [
+      "an oversized cream blazer over a ribbed tank and wide-leg cream trousers",
+      "a soft neutral knit and tailored straight-leg denim with clean sneakers",
+      "a linen shirt tucked into pleated trousers with loafers",
+    ],
+  },
+  ELEGANT: {
+    FEMALE: [
+      "an emerald satin slip dress with delicate gold jewelry and strappy heels",
+      "a champagne evening gown with an open back",
+      "a black cocktail dress with a plunging back and pointed pumps",
+      "a burgundy silk wrap dress with statement earrings",
+    ],
+    MALE: [
+      "a slim-cut charcoal three-piece suit with a silk pocket square and oxfords",
+      "a black tuxedo with a satin lapel and a bow tie",
+      "a navy tailored suit over a crisp white shirt with a burgundy tie",
+      "a midnight-blue velvet blazer over a black turtleneck and slim trousers",
+    ],
+    NONBINARY: [
+      "a satin unstructured suit in a soft neutral tone with sleek loafers",
+      "a silk shirt tucked into wide-leg tailored trousers with dress boots",
+      "a black tuxedo blazer over a matching silk camisole and wide-leg pants",
+    ],
+  },
+  STREETWEAR: {
+    FEMALE: [
+      "an oversized graphic hoodie, biker shorts, and chunky white sneakers",
+      "a cropped bomber jacket over a fitted crop top and baggy cargo pants",
+      "a mesh long-sleeve, distressed denim mini skirt, and combat boots",
+      "a puffer jacket, ribbed tank top, and baggy skater jeans with high-tops",
+    ],
+    MALE: [
+      "an oversized bomber jacket, graphic hoodie, and cargo pants with chunky sneakers",
+      "a puffer vest over a hoodie with baggy skater jeans and high-tops",
+      "a techwear jacket with utility pants and clean chunky sneakers",
+      "a varsity jacket over a plain tee, slim jeans, and combat sneakers",
+    ],
+    NONBINARY: [
+      "a techwear jacket, hoodie, and utility cargo pants with chunky sneakers",
+      "a bomber jacket, graphic hoodie, and baggy skater jeans",
+      "a puffer vest, plain tee, and cargo pants with high-tops",
+    ],
+  },
+  BOHEMIAN: {
+    FEMALE: [
+      "a flowing bohemian maxi dress with a floral print and layered turquoise necklaces",
+      "vintage 70s bell-bottom jeans, a peasant blouse, and a fringe suede vest",
+      "a linen sundress with a woven belt, straw hat, and leather sandals",
+      "a crochet crop top, high-waisted denim shorts, and stacked bracelets",
+    ],
+    MALE: [
+      "a loose linen button-up half-tucked into flowing tan trousers with leather sandals",
+      "a boho patterned open shirt over a plain tee, drawstring pants, and a shell necklace",
+      "an oversized linen shirt, cuffed relaxed jeans, and a suede fringe jacket",
+    ],
+    NONBINARY: [
+      "a flowing linen kaftan with layered turquoise jewelry and leather sandals",
+      "an embroidered peasant top, wide-leg linen pants, and stacked bracelets",
+      "a suede fringe vest over a loose cotton tee and relaxed straight-leg pants",
+    ],
+  },
+  GOTH: {
+    FEMALE: [
+      "a black lace corset dress with fishnet tights and platform boots",
+      "an oversized band tee, black leather mini skirt, and knee-high combat boots",
+      "a black high-neck lace top with a Victorian collar and a long velvet skirt",
+      "a studded leather biker jacket, ripped fishnets, and a plaid mini skirt",
+    ],
+    MALE: [
+      "a black leather biker jacket, band tee, ripped black jeans, and combat boots",
+      "a fitted black turtleneck, slim leather pants, and studded boots",
+      "a Victorian-inspired black frock coat over a lace shirt and slim trousers",
+    ],
+    NONBINARY: [
+      "an oversized black band tee, ripped skinny jeans, and combat boots",
+      "a studded black leather jacket, mesh shirt, and slim black pants",
+      "a long black velvet coat over a graphic tee and slim jeans",
+    ],
+  },
+  ANIME_FASHION: {
+    FEMALE: [
+      "a preppy sailor-style blouse with a red ribbon tie and pleated plaid skirt",
+      "a kawaii pastel cropped hoodie with heart prints, pleated mini skirt, and thigh-high socks",
+      "a cyberpunk techwear jacket with LED trim over a mesh top and fitted cargo shorts",
+      "a magical-girl style dress with layered frills, ribbons, and a lace bib",
+    ],
+    MALE: [
+      "a modern school-style blazer, white shirt, red tie, and dark trousers",
+      "an anime streetwear hoodie with graphic prints and slim cargo pants",
+      "a gakuran high-collar dark navy uniform",
+      "a cyberpunk trench coat with utility straps and slim tech pants",
+    ],
+    NONBINARY: [
+      "a casual anime hoodie with a pastel graphic print and cuffed cargo pants",
+      "a cyberpunk techwear vest over a fitted long-sleeve and slim tech pants",
+      "a preppy cardigan over a collared shirt and pleated shorts",
+    ],
+  },
+  SPORTY: {
+    FEMALE: [
+      "a matching athletic set with a sports bra and high-waisted leggings and clean running shoes",
+      "a tennis skirt, fitted polo top, and clean white sneakers",
+      "a cropped hoodie, biker shorts, and colorful running shoes",
+      "a fitted running tank and split-side running shorts",
+    ],
+    MALE: [
+      "a fitted athletic tank and gym shorts with modern running shoes",
+      "a moisture-wicking training tee, joggers, and clean running shoes",
+      "a technical running jacket over a compression tee and compression tights",
+    ],
+    NONBINARY: [
+      "a matching training set with a fitted top and joggers with clean sneakers",
+      "a technical running jacket, cropped tank, and biker shorts",
+    ],
+  },
+};
+
 const CLOTHING_POOLS: Record<string, Record<string, readonly string[]>> = {
   REALISTIC: {
     FEMALE: [
@@ -320,14 +513,14 @@ function pickFromPool<T>(pool: readonly T[], seed: string): T {
 export class TemplatePromptCompiler implements PromptCompiler {
   compile(input: PromptCompilerInput): CompiledPrompts {
     const app = input.appearance;
-    const genderNoun =
-      app.gender === "FEMALE" ? "woman" : app.gender === "MALE" ? "man" : "person";
+    const genderNoun = GENDER_NOUN[app.gender] ?? "person";
+    const ethnicityLabel = ETHNICITY_LABEL[app.ethnicity] ?? "";
 
     const appearancePrompt = this.buildAppearancePrompt({
       baseStyle: app.baseStyle,
       gender: app.gender,
       genderNoun,
-      ethnicity: app.ethnicity,
+      ethnicityLabel,
       ageYears: app.ageYears,
       eyeColor: app.eyeColor,
       hairStyle: app.hairStyle,
@@ -336,10 +529,11 @@ export class TemplatePromptCompiler implements PromptCompiler {
       bustSize: app.bustSize,
       hipSize: app.hipSize,
       clothing: app.clothing,
+      fashionStyle: app.fashionStyle,
       name: input.name,
     });
 
-    const systemPrompt = this.buildSystemPrompt(input, genderNoun);
+    const systemPrompt = this.buildSystemPrompt(input, genderNoun, ethnicityLabel);
     const bio = this.buildBio(input);
 
     return {
@@ -354,7 +548,7 @@ export class TemplatePromptCompiler implements PromptCompiler {
     baseStyle: string;
     gender: string;
     genderNoun: string;
-    ethnicity: string;
+    ethnicityLabel: string;
     ageYears: number;
     eyeColor: string;
     hairStyle: string;
@@ -363,6 +557,7 @@ export class TemplatePromptCompiler implements PromptCompiler {
     bustSize: string | null;
     hipSize: string | null;
     clothing: string | null;
+    fashionStyle: string | null;
     name: string;
   }): string {
     const stylePrefix =
@@ -377,11 +572,18 @@ export class TemplatePromptCompiler implements PromptCompiler {
     const clothing =
       a.clothing && a.clothing.trim().length > 0
         ? a.clothing.trim()
-        : this.resolveDefaultClothing(a.baseStyle, a.gender, a.name);
+        : this.resolveDefaultClothing(a.baseStyle, a.gender, a.fashionStyle, a.name);
+
+    // Some legacy Ethnicity values (OTHER) have no descriptive label — in
+    // that case, omit the ethnicity fragment entirely rather than emitting
+    // a stray "undefined man".
+    const subject = a.ethnicityLabel
+      ? `${a.ethnicityLabel} ${a.genderNoun}`
+      : a.genderNoun;
 
     const parts: string[] = [
       stylePrefix,
-      `${a.ethnicity.toLowerCase()} ${a.genderNoun}`,
+      subject,
       `${a.ageYears} years old`,
       `${a.eyeColor.toLowerCase()} eyes`,
       `${a.hairColor.toLowerCase()} ${a.hairStyle.toLowerCase()} hair`,
@@ -398,21 +600,46 @@ export class TemplatePromptCompiler implements PromptCompiler {
   private resolveDefaultClothing(
     baseStyle: string,
     gender: string,
+    fashionStyle: string | null,
     name: string,
   ): string {
+    // Wizard v2 populates fashionStyle → deterministic pick from the
+    // fashion-specific pool. Falls back to base-style pool for legacy
+    // characters that predate the Fashion step.
+    const poolKey = GENDER_POOL_KEY[gender] ?? "FEMALE";
+
+    if (fashionStyle && FASHION_POOLS[fashionStyle]) {
+      const bucket = FASHION_POOLS[fashionStyle];
+      const pool =
+        bucket[poolKey] ??
+        bucket.FEMALE ??
+        bucket.MALE ??
+        bucket.NONBINARY;
+      if (pool && pool.length > 0) {
+        return pickFromPool(pool, `${fashionStyle}:${poolKey}:${name}`);
+      }
+    }
+
     const styleKey = CLOTHING_POOLS[baseStyle] ? baseStyle : "REALISTIC";
     const styleBucket = CLOTHING_POOLS[styleKey];
     const pool =
-      styleBucket[gender] ?? styleBucket.FEMALE ?? styleBucket.MALE;
-    return pickFromPool(pool, `${styleKey}:${gender}:${name}`);
+      styleBucket[poolKey] ?? styleBucket.FEMALE ?? styleBucket.MALE;
+    return pickFromPool(pool, `${styleKey}:${poolKey}:${name}`);
   }
 
   private buildSystemPrompt(
     input: PromptCompilerInput,
     genderNoun: string,
+    ethnicityLabel: string,
   ): string {
+    // Character identity (WHO you are). The chat-time PromptComposer
+    // appends the RESPONSE STYLE block (HOW to reply) on every turn, so
+    // this file focuses on persona traits + a light nod toward the
+    // roleplay format so the character prompt is still legible in
+    // isolation (admin UI, prompt review, etc.).
+    const heritage = ethnicityLabel ? `${ethnicityLabel} ` : "";
     const lines: string[] = [
-      `You are ${input.name}, a ${input.appearance.ageYears}-year-old ${input.appearance.ethnicity.toLowerCase()} ${genderNoun}.`,
+      `You are ${input.name}, a ${input.appearance.ageYears}-year-old ${heritage}${genderNoun}.`,
       input.personality.personalityFragment,
       input.personality.relationshipFragment,
       input.personality.occupationFragment,
@@ -425,14 +652,16 @@ export class TemplatePromptCompiler implements PromptCompiler {
     }
     lines.push("");
     lines.push("Rules:");
-    lines.push(`- Always respond in first person as ${input.name}. Never break character or refer to yourself as an AI, model, or assistant.`);
-    lines.push(`- Match the ${input.personality.relationshipLabel.toLowerCase()} dynamic in tone, register, and pacing.`);
+    lines.push(`- Always respond in first person as ${input.name}, as if we're co-writing an intimate scene together.`);
+    lines.push(`- Match the ${input.personality.relationshipLabel.toLowerCase()} dynamic — tone, register, pacing, and the way you address the user should reflect it.`);
+    lines.push("- Use *asterisks* for physical actions, expressions, and inner sensations. Keep spoken dialogue outside them.");
+    lines.push("- Never narrate the user's actions, thoughts, or dialogue — only your own.");
     lines.push(
       input.nsfwOptIn
         ? "- Explicit content is permitted when the user leads there. Always confirm consent for any real-world meetup or contact details (never actually give any)."
         : "- Keep responses safe-for-work. Redirect explicit requests warmly without moralizing.",
     );
-    lines.push("- Never claim to be human. If asked directly, deflect in-character (e.g. 'why does that matter?').");
+    lines.push("- Never claim to be human. If asked directly, deflect in-character (e.g. *she smirks* why does that matter?).");
     return lines.join("\n");
   }
 

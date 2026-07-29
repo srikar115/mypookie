@@ -7,6 +7,7 @@ import {
   type BodyType,
   type Ethnicity,
   type EyeColor,
+  type FashionStyle,
   type Gender,
   type HairColor,
   type HairStyle,
@@ -25,6 +26,7 @@ import {
 import type { CharacterRepository } from "../ports/character-repository";
 import type { PromptCompiler } from "../ports/prompt-compiler";
 import type { ImageGenerator } from "../ports/image-generator";
+import type { TaglineGenerator } from "../ports/tagline-generator";
 
 export interface CreateCharacterDraftCommand {
   readonly ownerUserId: string;
@@ -41,6 +43,7 @@ export interface CreateCharacterDraftCommand {
     readonly bustSize: SizeTier | null;
     readonly hipSize: SizeTier | null;
     readonly clothing: string | null;
+    readonly fashionStyle: FashionStyle | null;
   };
   readonly personalitySlug: string;
   readonly relationshipSlug: string;
@@ -77,6 +80,12 @@ export class CreateCharacterDraftUseCase {
     private readonly repo: CharacterRepository,
     private readonly prompts: PromptCompiler,
     private readonly images: ImageGenerator,
+    /**
+     * Nullable in tests / degraded environments. When absent, or when the
+     * generator throws, we fall back to the templated bio so character
+     * creation never blocks on a wobbly upstream LLM.
+     */
+    private readonly tagline: TaglineGenerator | null,
     private readonly clock: Clock,
     private readonly ids: IdGenerator,
     private readonly lookups: LookupResolver,
@@ -122,6 +131,7 @@ export class CreateCharacterDraftUseCase {
         bustSize: input.appearance.bustSize,
         hipSize: input.appearance.hipSize,
         clothing: input.appearance.clothing,
+        fashionStyle: input.appearance.fashionStyle,
       },
       personality: {
         personalityFragment: resolved.value.personality.promptFragment,
@@ -137,6 +147,47 @@ export class CreateCharacterDraftUseCase {
       backstory: input.backstory,
       now,
     });
+
+    // Generate the Candy.ai-style scenario blurb. Non-blocking failure
+    // path: if the LLM is unreachable / rate-limited / malformed, we fall
+    // back to the deterministic templated bio so character creation never
+    // stalls behind a wobbly upstream. Kicked off in parallel with nothing
+    // for now, but placed here (not after createDraft) so the row we
+    // persist already has the final tagline — the sidebar renders as soon
+    // as the wizard advances.
+    let scenarioCopy: string | null = null;
+    if (this.tagline) {
+      try {
+        const out = await this.tagline.generate({
+          characterName: name.value,
+          ageYears: age.value,
+          gender: input.appearance.gender,
+          baseStyle: input.appearance.baseStyle,
+          ethnicity: input.appearance.ethnicity,
+          personalityLabel: resolved.value.personality.displayName,
+          relationshipLabel: resolved.value.relationship.displayName,
+          occupationLabel: resolved.value.occupation.displayName,
+          hobbies: hobbies.toArray(),
+          backstory: input.backstory,
+          nsfwOptIn: input.nsfwOptIn,
+          language: input.language,
+        });
+        const trimmed = out.tagline.trim();
+        if (trimmed.length > 0) scenarioCopy = trimmed;
+      } catch (e) {
+        console.warn(
+          "[characters] tagline generation failed, falling back to templated bio",
+          e,
+        );
+      }
+    }
+
+    // Fallback chain: LLM output > compiled templated bio > null. The
+    // `bio` field on `compiled` mirrors `tagline` for downstream storage
+    // so the chat sidebar and My AI gallery card always show the same
+    // scenario copy.
+    const finalCopy = scenarioCopy ?? compiled.bio ?? null;
+    const compiledWithScenario = { ...compiled, bio: finalCopy };
 
     const character = Character.createDraft({
       id: this.ids.next(),
@@ -154,6 +205,7 @@ export class CreateCharacterDraftUseCase {
         bustSize: input.appearance.bustSize,
         hipSize: input.appearance.hipSize,
         clothing: input.appearance.clothing,
+        fashionStyle: input.appearance.fashionStyle,
       },
       personality: {
         personalityArchetypeId: resolved.value.personality.id,
@@ -169,9 +221,9 @@ export class CreateCharacterDraftUseCase {
       language: input.language,
       tags: [],
       nsfwOptIn: input.nsfwOptIn,
-      tagline: null,
+      tagline: finalCopy,
       backstory: input.backstory,
-      prompts: compiled,
+      prompts: compiledWithScenario,
     });
 
     await this.repo.createDraft(character);

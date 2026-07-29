@@ -16,27 +16,51 @@ export class PrismaMemoryStore implements MemoryStore {
     characterId: string;
     sourceMessageId: string | null;
     drafts: readonly MemoryFactDraft[];
+    embeddings?: readonly (readonly number[] | null)[];
     now: Date;
   }): Promise<number> {
     if (input.drafts.length === 0) return 0;
-    const rows = input.drafts.map((d) => ({
-      userId: input.userId,
-      characterId: input.characterId,
-      sourceMessageId: input.sourceMessageId,
-      content: d.content,
-      category: d.category,
-      entities: [...d.entities],
-      valence: clamp(d.valence, -1, 1),
-      confidence: clamp(d.confidence, 0, 1),
-      metadata: (d.metadata ?? {}) as object,
-      extractedAt: input.now,
-      expiresAt: d.expiresAt ?? null,
-    }));
-    const res = await this.db.memoryFact.createMany({
-      data: rows,
-      skipDuplicates: true,
-    });
-    return res.count;
+
+    // Raw SQL (instead of `createMany`) because Prisma has no first-class
+    // type for pgvector — `memory_facts.embedding` is Unsupported("vector(1024)").
+    // We serialize each vector as a pgvector text literal (`[v1,v2,...]`) and
+    // cast in-SQL; NULL literal for facts we didn't embed. One INSERT per
+    // draft keeps the code straightforward and turns emit ≤ 4 facts, so the
+    // per-turn round-trip cost is negligible against the LLM call preceding it.
+    let inserted = 0;
+    for (let i = 0; i < input.drafts.length; i++) {
+      const d = input.drafts[i]!;
+      const rawEmbedding = input.embeddings?.[i] ?? null;
+      const embeddingLiteral = toPgVectorLiteral(rawEmbedding);
+      const entities = [...d.entities];
+      const valence = clamp(d.valence, -1, 1);
+      const confidence = clamp(d.confidence, 0, 1);
+      const metadata = JSON.stringify(d.metadata ?? {});
+
+      const affected = await this.db.$executeRaw`
+        INSERT INTO "memory_facts" (
+          "id", "userId", "characterId", "sourceMessageId", "content",
+          "category", "entities", "valence", "confidence", "metadata",
+          "extractedAt", "expiresAt", "embedding"
+        ) VALUES (
+          gen_random_uuid(),
+          ${input.userId}::uuid,
+          ${input.characterId}::uuid,
+          ${input.sourceMessageId}::uuid,
+          ${d.content},
+          ${d.category}::"MemoryCategory",
+          ${entities}::text[],
+          ${valence}::double precision,
+          ${confidence}::double precision,
+          ${metadata}::jsonb,
+          ${input.now},
+          ${d.expiresAt ?? null},
+          ${embeddingLiteral}::vector
+        );
+      `;
+      inserted += Number(affected);
+    }
+    return inserted;
   }
 
   async upsertStructuredFacts(input: {
@@ -97,4 +121,20 @@ export class PrismaMemoryStore implements MemoryStore {
 function clamp(v: number, min: number, max: number): number {
   if (Number.isNaN(v)) return min;
   return Math.max(min, Math.min(max, v));
+}
+
+/**
+ * Serialize a `readonly number[]` into pgvector's text-literal form
+ * `[v1,v2,...]`. Returns `null` (typed NULL in SQL) when the input is null
+ * or empty. NaN / Infinity are coerced to 0 so a bad embedding row cannot
+ * poison the batch — pgvector rejects those values with a hard error.
+ */
+function toPgVectorLiteral(v: readonly number[] | null): string | null {
+  if (v === null || v.length === 0) return null;
+  const parts = new Array<string>(v.length);
+  for (let i = 0; i < v.length; i++) {
+    const x = v[i]!;
+    parts[i] = Number.isFinite(x) ? x.toString() : "0";
+  }
+  return `[${parts.join(",")}]`;
 }

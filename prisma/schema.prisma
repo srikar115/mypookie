@@ -230,6 +230,10 @@ model Character {
   bustSize  SizeTier?
   hipSize   SizeTier?
   clothing  String?
+  // Wizard v2 — style-of-dress preset that drives the wardrobe pool at
+  // image generation time. Optional so pre-v2 rows (if any) don't break;
+  // wizard v2 always writes it.
+  fashionStyle FashionStyle?
 
   // Wizard answers — character (screenshot 7 "Character" tab)
   personalityArchetypeId  String @db.Uuid
@@ -357,6 +361,8 @@ enum BaseStyle {
 }
 
 enum Ethnicity {
+  // Legacy coarse buckets — retained so pre-v2 admin data isn't
+  // disturbed. New wizard emits the fine-grained values below.
   CAUCASIAN
   LATINA
   ASIAN
@@ -364,12 +370,23 @@ enum Ethnicity {
   EBONY
   MIXED
   OTHER
+  // Wizard v2 (Candy.ai-style Heritage picker).
+  EAST_ASIAN
+  SOUTHEAST_ASIAN
+  SOUTH_ASIAN
+  MIDDLE_EASTERN
+  NORTH_AFRICAN
+  BLACK
+  CARIBBEAN
+  EUROPEAN
 }
 
 enum Gender {
   FEMALE
   MALE
   NONBINARY
+  TRANS_WOMAN
+  TRANS_MAN
 }
 
 enum EyeColor {
@@ -424,6 +441,18 @@ enum SizeTier {
   M
   L
   XL
+}
+
+// Wizard v2 — Fashion step. Drives the wardrobe pool used by the image
+// prompt builder and by the wizard's Fashion picker tile.
+enum FashionStyle {
+  CASUAL_CHIC
+  ELEGANT
+  STREETWEAR
+  BOHEMIAN
+  GOTH
+  ANIME_FASHION
+  SPORTY
 }
 
 enum CharacterStatus {
@@ -494,6 +523,12 @@ enum ModelPurpose {
   IMAGE_IMAGE_TO_IMAGE
   VIDEO_IMAGE_TO_VIDEO
   EMBEDDING
+  // Character-creation-time scenario/tagline copywriter. Produces the
+  // 2-3 sentence Candy.ai-style hook stored on `characters.tagline` +
+  // `.bio`. Kept as a distinct purpose so admins can point it at a
+  // stronger creative-writing model (gpt-4o, Claude Haiku, etc.)
+  // separately from the memory extractor.
+  TAGLINE_GENERATOR
 }
 
 enum ModelProvider {
@@ -661,4 +696,41 @@ model RelationshipMilestone {
 
   @@index([userId, characterId, occurredAt(sort: Desc)])
   @@map("relationship_milestones")
+}
+
+// ─── Wizard v2 preview images ─────────────────────────────────────────────
+// One row per (optionType, optionValue, baseStyle, gender) tuple. Feeds the
+// visual pickers in the Candy.ai-style character wizard. Populated by an
+// offline admin seeder script (Phase 3) that calls the fal.ai image model
+// and uploads results to R2.
+
+enum WizardOptionType {
+  GENDER
+  LOOK
+  BOND
+  PERSONALITY
+  AGE_BUCKET
+  ETHNICITY
+  HAIR_COLOR
+  HAIR_STYLE
+  EYE_COLOR
+  BODY_TYPE
+  FASHION
+}
+
+model WizardOptionPreview {
+  id              String           @id @default(uuid()) @db.Uuid
+  optionType      WizardOptionType
+  optionValue     String
+  baseStyle       BaseStyle
+  gender          Gender
+  imageR2Key      String
+  imageUrl        String
+  promptSnapshot  String           @db.Text
+  generatedAt     DateTime         @default(now()) @db.Timestamptz(6)
+  updatedByUserId String?          @db.Uuid
+
+  @@unique([optionType, optionValue, baseStyle, gender], map: "wizard_option_previews_unique")
+  @@index([baseStyle, gender, optionType], map: "wizard_option_previews_style_gender_idx")
+  @@map("wizard_option_previews")
 }

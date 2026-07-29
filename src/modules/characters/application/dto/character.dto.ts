@@ -6,6 +6,7 @@ import type {
   CharacterVisibility,
   Ethnicity,
   EyeColor,
+  FashionStyle,
   Gender,
   HairColor,
   HairStyle,
@@ -34,6 +35,7 @@ export interface CharacterDto {
     readonly bustSize: SizeTier | null;
     readonly hipSize: SizeTier | null;
     readonly clothing: string | null;
+    readonly fashionStyle: FashionStyle | null;
   };
   readonly personality: {
     readonly personalityArchetypeId: string;

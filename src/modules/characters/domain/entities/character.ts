@@ -24,13 +24,53 @@ export type CharacterStatus = "DRAFT" | "ACTIVE" | "ARCHIVED";
 export type CharacterVisibility = "PRIVATE" | "UNLISTED" | "PUBLIC";
 export type CharacterModerationStatus = "APPROVED" | "UNDER_REVIEW" | "BLOCKED";
 export type BaseStyle = "REALISTIC" | "ANIME" | "THREE_D" | "CARTOON";
-export type Ethnicity = "CAUCASIAN" | "LATINA" | "ASIAN" | "ARAB" | "EBONY" | "MIXED" | "OTHER";
-export type Gender = "FEMALE" | "MALE" | "NONBINARY";
+
+/**
+ * Ethnicity — union of the legacy coarse buckets (pre-wizard-v2) plus the
+ * fine-grained Candy.ai-style heritage values the new wizard emits. Both
+ * kinds are present in the DB enum for backward compatibility; the wizard
+ * only ever writes the fine-grained set.
+ */
+export type Ethnicity =
+  // Legacy — retained so historical/admin rows still typecheck.
+  | "CAUCASIAN"
+  | "LATINA"
+  | "ASIAN"
+  | "ARAB"
+  | "EBONY"
+  | "MIXED"
+  | "OTHER"
+  // Wizard v2.
+  | "EAST_ASIAN"
+  | "SOUTHEAST_ASIAN"
+  | "SOUTH_ASIAN"
+  | "MIDDLE_EASTERN"
+  | "NORTH_AFRICAN"
+  | "BLACK"
+  | "CARIBBEAN"
+  | "EUROPEAN";
+
+export type Gender = "FEMALE" | "MALE" | "NONBINARY" | "TRANS_WOMAN" | "TRANS_MAN";
 export type EyeColor = "BROWN" | "BLUE" | "GREEN" | "HAZEL" | "AMBER" | "GRAY" | "VIOLET" | "HETEROCHROMIA";
 export type HairStyle = "STRAIGHT" | "WAVY" | "CURLY" | "BANGS" | "PONYTAIL" | "BOB" | "PIXIE" | "BRAIDS" | "UPDO";
 export type HairColor = "BLACK" | "BROWN" | "BLONDE" | "RED" | "AUBURN" | "WHITE" | "SILVER" | "PINK" | "PURPLE" | "BLUE" | "FANTASY_OTHER";
 export type BodyType = "SLIM" | "ATHLETIC" | "CURVY" | "PLUS_SIZE" | "PETITE" | "VOLUPTUOUS";
 export type SizeTier = "XS" | "S" | "M" | "L" | "XL";
+
+/**
+ * Wizard v2 fashion pool. The wardrobe fragment injected into the image
+ * generation prompt is chosen from `FASHION_POOLS[fashionStyle]` in the
+ * prompt compiler. Users may still override with a free-form `clothing`
+ * string for finer control.
+ */
+export type FashionStyle =
+  | "CASUAL_CHIC"
+  | "ELEGANT"
+  | "STREETWEAR"
+  | "BOHEMIAN"
+  | "GOTH"
+  | "ANIME_FASHION"
+  | "SPORTY";
 
 export interface CharacterAppearance {
   readonly baseStyle: BaseStyle;
@@ -44,6 +84,8 @@ export interface CharacterAppearance {
   readonly bustSize: SizeTier | null;
   readonly hipSize: SizeTier | null;
   readonly clothing: string | null;
+  /** Optional; only wizard v2 populates it. */
+  readonly fashionStyle: FashionStyle | null;
 }
 
 export interface CharacterPersonality {

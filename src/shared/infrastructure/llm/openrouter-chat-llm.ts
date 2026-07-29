@@ -123,6 +123,28 @@ export class OpenRouterChatLlm implements ChatLlm {
     ) {
       params.response_format = modelParams.response_format;
     }
+    // OpenRouter-specific fallback chain — passing `models: ["primary",
+    // "fallback1", ...]` makes OpenRouter automatically try each model
+    // in order when the previous one 429s / 5xxs / times out. Our
+    // in-process retry loop still runs; this is a *second* layer of
+    // resilience that trades a single flaky provider for a whole
+    // fallback chain without any extra code path.
+    // Docs: https://openrouter.ai/docs/features/model-routing#the-models-parameter
+    if (
+      Array.isArray(modelParams.models) &&
+      modelParams.models.every((m: unknown): m is string => typeof m === "string")
+    ) {
+      params.models = modelParams.models as string[];
+    }
+    // OpenRouter provider preference — `{ order: [...], allow_fallbacks: bool }`.
+    // Kept generic so we can pin providers per model_config without a
+    // code deploy. Docs: https://openrouter.ai/docs/features/provider-routing
+    if (
+      modelParams.provider &&
+      typeof modelParams.provider === "object"
+    ) {
+      params.provider = modelParams.provider;
+    }
 
     // Overrides take precedence.
     if (overrides?.temperature !== undefined) params.temperature = overrides.temperature;

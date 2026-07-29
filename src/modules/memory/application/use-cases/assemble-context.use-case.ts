@@ -31,6 +31,7 @@ export class AssembleContextUseCase implements MemoryContextProvider {
     characterId: string;
     conversationId: string;
     userMessage: string;
+    userDisplayName?: string | null;
   }): Promise<string> {
     if (!env.MEMORY_ENABLED) return "";
 
@@ -51,11 +52,21 @@ export class AssembleContextUseCase implements MemoryContextProvider {
       }),
     ]);
 
+    // Fallback layer: if memory hasn't yet captured the user's name via
+    // fact extraction, use the display name from auth. Any structured
+    // fact wins over the fallback so the memory extractor stays
+    // authoritative once it has learned the user's preferred name.
+    const merged: Record<string, unknown> = { ...structured };
+    const trimmedName = input.userDisplayName?.trim();
+    if (trimmedName && trimmedName.length > 0 && !merged["name"]) {
+      merged["name"] = trimmedName;
+    }
+
     const sections: string[] = [];
 
-    if (Object.keys(structured).length > 0) {
+    if (Object.keys(merged).length > 0) {
       sections.push("USER PROFILE:");
-      for (const [k, v] of Object.entries(structured)) {
+      for (const [k, v] of Object.entries(merged)) {
         sections.push(`  · ${k}: ${stringifyValue(v)}`);
       }
     }

@@ -5,14 +5,10 @@ import { AuthDialog, type AuthTab, type SessionUser } from "@/modules/identity/c
 import { PublicSidebar } from "./PublicSidebar";
 import { PublicTopbar } from "./PublicTopbar";
 
-type Category = "girls" | "anime" | "guys";
-
 interface ShellContextValue {
   openLogin: () => void;
   openSignup: () => void;
   user: SessionUser | null;
-  category: Category;
-  setCategory: (c: Category) => void;
 }
 
 const ShellContext = createContext<ShellContextValue | null>(null);
@@ -32,7 +28,6 @@ export function PublicShell({ children, user }: Props) {
   const [authOpen, setAuthOpen] = useState(false);
   const [authTab, setAuthTab] = useState<AuthTab>("login");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [category, setCategory] = useState<Category>("girls");
 
   const openLogin = () => {
     setAuthTab("login");
@@ -44,16 +39,12 @@ export function PublicShell({ children, user }: Props) {
   };
 
   return (
-    <ShellContext.Provider
-      value={{ openLogin, openSignup, user, category, setCategory }}
-    >
+    <ShellContext.Provider value={{ openLogin, openSignup, user }}>
       <PublicTopbar
         user={user}
         onLoginClick={openLogin}
         onSignupClick={openSignup}
         onMobileMenuClick={() => setMobileMenuOpen((v) => !v)}
-        category={category}
-        onCategoryChange={setCategory}
       />
 
       <PublicSidebar user={user} onProtectedClick={openLogin} />

@@ -15,6 +15,10 @@ import {
   createIngestTurnUseCase,
 } from "@/modules/memory";
 import { OpenRouterChatLlm } from "@/shared/infrastructure/llm/openrouter-chat-llm";
+import {
+  classifyLlmError,
+  isTransientLlmError,
+} from "@/shared/infrastructure/llm/llm-error-classifier";
 import { env } from "@/config/env";
 
 /**
@@ -99,6 +103,7 @@ export async function POST(
       actorUserId: server.actor.id,
       conversationId,
       latestUserMessage: payload.content,
+      actorDisplayName: server.actor.displayName,
     });
   } catch (e) {
     return handleDomainError(e);
@@ -121,11 +126,16 @@ export async function POST(
     modelId: chatModel.modelId,
   });
 
-  // 5) Open the LLM stream.
+  // 5) Open the LLM stream with silent retry on transient upstream
+  //    errors (429s, 5xx, network blips). We never surface those to the
+  //    user unless every retry is exhausted; even then, only a stable
+  //    `code` reaches the browser — the raw provider message stays in
+  //    server logs. See docs/observability.md for the classification
+  //    table.
   const llm = new OpenRouterChatLlm();
   let tokenIter: AsyncIterable<string>;
   try {
-    tokenIter = await llm.stream({
+    tokenIter = await openStreamWithRetry(llm, {
       model: chatModel,
       messages: built.messages,
       overrides: {
@@ -135,12 +145,18 @@ export async function POST(
       signal: request.signal,
     });
   } catch (e) {
-    const errMsg = e instanceof Error ? e.message : String(e);
+    const { code, loggable } = classifyLlmError(e);
+    console.warn(
+      `[chat.stream] upstream failed (code=${code}) — ${loggable}`,
+    );
     await appendAssistant.fail({
       messageId: placeholder.id,
-      errorMessage: errMsg,
+      errorMessage: `code=${code}; ${loggable}`,
     });
-    return jsonError(502, `Upstream LLM failed to start: ${errMsg}`);
+    // Streaming a single error event through SSE (200 + text/event-stream)
+    // instead of a JSON 5xx keeps the client's error-handling on one
+    // code path: it already listens for `event.type === "error"`.
+    return sseErrorResponse(code);
   }
 
   // 6) Set up SSE + after() ingest. Both close over `streamState` so `after`
@@ -201,18 +217,25 @@ export async function POST(
 
         send({ type: "done", messageId: placeholder.id });
       } catch (e) {
-        const errMsg = e instanceof Error ? e.message : String(e);
-        streamState.failed = errMsg;
+        // Mid-stream failure — we've already committed to a 200 SSE
+        // response so we can't switch to a JSON error. Classify, log
+        // the raw message server-side, and hand the client a stable
+        // code plus a short generic message it can ignore.
+        const { code, loggable } = classifyLlmError(e);
+        streamState.failed = loggable;
+        console.warn(
+          `[chat.stream] mid-stream failure (code=${code}) — ${loggable}`,
+        );
         try {
           await appendAssistant.fail({
             messageId: placeholder.id,
-            errorMessage: errMsg,
+            errorMessage: `code=${code}; ${loggable}`,
             partialContent: streamState.content,
           });
         } catch (finalizeErr) {
           console.warn("[chat.stream] failed to mark assistant FAILED", finalizeErr);
         }
-        send({ type: "error", message: errMsg });
+        send({ type: "error", code, message: "upstream_error" });
       } finally {
         controller.close();
       }
@@ -230,13 +253,68 @@ export async function POST(
 type SsEvent =
   | { readonly type: "text_delta"; readonly delta: string }
   | { readonly type: "done"; readonly messageId: string }
-  | { readonly type: "error"; readonly message: string };
+  | {
+      readonly type: "error";
+      /** Stable machine code the client maps to friendly copy. */
+      readonly code: string;
+      /** Generic short label; the client ignores this in favour of `code`. */
+      readonly message: string;
+    };
 
 function jsonError(status: number, message: string): Response {
   return new Response(JSON.stringify({ ok: false, error: message }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/**
+ * Wrap a single `error` SSE frame in a 200 response. Used when the
+ * upstream fails BEFORE we hand off to the ReadableStream — sending
+ * this instead of a JSON error keeps client parsing on the same
+ * `text/event-stream` path.
+ */
+function sseErrorResponse(code: string): Response {
+  const evt: SsEvent = { type: "error", code, message: "upstream_error" };
+  const body = `data: ${JSON.stringify(evt)}\n\n`;
+  return new Response(body, { status: 200, headers: SSE_HEADERS });
+}
+
+/**
+ * Attempt `llm.stream(...)` up to 3 times, backing off on transient
+ * upstream errors (429 / 5xx / network). Aborted requests
+ * short-circuit immediately — retrying an already-cancelled request
+ * would just waste budget on a client that walked away.
+ *
+ * Backoffs: ~500ms, ~1500ms, jittered ±15% so parallel senders don't
+ * synchronise their retries.
+ */
+async function openStreamWithRetry(
+  llm: OpenRouterChatLlm,
+  args: Parameters<OpenRouterChatLlm["stream"]>[0],
+): Promise<AsyncIterable<string>> {
+  const MAX_ATTEMPTS = 3;
+  const BASE_DELAYS_MS = [0, 500, 1500];
+  let lastErr: unknown = new Error("no attempts made");
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (args.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const delay = BASE_DELAYS_MS[attempt];
+    if (delay > 0) {
+      const jittered = Math.round(delay * (0.85 + Math.random() * 0.3));
+      await new Promise((r) => setTimeout(r, jittered));
+    }
+    try {
+      return await llm.stream(args);
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientLlmError(e)) break;
+      const { code, loggable } = classifyLlmError(e);
+      console.warn(
+        `[chat.stream] transient upstream error (attempt ${attempt + 1}/${MAX_ATTEMPTS}, code=${code}): ${loggable}`,
+      );
+    }
+  }
+  throw lastErr;
 }
 
 function handleDomainError(e: unknown): Response {

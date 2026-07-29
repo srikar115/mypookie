@@ -8,6 +8,7 @@ import { z } from "zod";
 
 export const baseStyleEnum = z.enum(["REALISTIC", "ANIME", "THREE_D", "CARTOON"]);
 export const ethnicityEnum = z.enum([
+  // Legacy — retained so legacy payloads (should any exist) still parse.
   "CAUCASIAN",
   "LATINA",
   "ASIAN",
@@ -15,8 +16,32 @@ export const ethnicityEnum = z.enum([
   "EBONY",
   "MIXED",
   "OTHER",
+  // Wizard v2 heritage picker.
+  "EAST_ASIAN",
+  "SOUTHEAST_ASIAN",
+  "SOUTH_ASIAN",
+  "MIDDLE_EASTERN",
+  "NORTH_AFRICAN",
+  "BLACK",
+  "CARIBBEAN",
+  "EUROPEAN",
 ]);
-export const genderEnum = z.enum(["FEMALE", "MALE", "NONBINARY"]);
+export const genderEnum = z.enum([
+  "FEMALE",
+  "MALE",
+  "NONBINARY",
+  "TRANS_WOMAN",
+  "TRANS_MAN",
+]);
+export const fashionStyleEnum = z.enum([
+  "CASUAL_CHIC",
+  "ELEGANT",
+  "STREETWEAR",
+  "BOHEMIAN",
+  "GOTH",
+  "ANIME_FASHION",
+  "SPORTY",
+]);
 export const eyeColorEnum = z.enum([
   "BROWN",
   "BLUE",
@@ -75,6 +100,7 @@ export const wizardPayloadSchema = z.object({
     bustSize: sizeTierEnum.nullable().optional().default(null),
     hipSize: sizeTierEnum.nullable().optional().default(null),
     clothing: z.string().trim().max(200).nullable().optional().default(null),
+    fashionStyle: fashionStyleEnum.nullable().optional().default(null),
   }),
   personalitySlug: z.string().trim().min(1),
   relationshipSlug: z.string().trim().min(1),

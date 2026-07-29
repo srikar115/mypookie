@@ -11,12 +11,18 @@ export interface MemoryStore {
    * to gate obvious repeats before it hands off. Insertions must be
    * idempotent-friendly (unique constraint TBD; for v1 we accept duplicates
    * and let retrieval score them together).
+   *
+   * `embeddings` is index-aligned with `drafts`. A `null` entry (or the
+   * whole array being omitted) writes NULL into `memory_facts.embedding`
+   * for that row — semantic retrieval then falls back to lexical + entity
+   * + recency for that fact.
    */
   insertFacts(input: {
     userId: string;
     characterId: string;
     sourceMessageId: string | null;
     drafts: readonly MemoryFactDraft[];
+    embeddings?: readonly (readonly number[] | null)[];
     now: Date;
   }): Promise<number>;
 

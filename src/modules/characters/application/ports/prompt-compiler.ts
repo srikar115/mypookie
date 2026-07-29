@@ -19,6 +19,8 @@ export interface PromptCompilerInput {
     readonly bustSize: string | null;
     readonly hipSize: string | null;
     readonly clothing: string | null;
+    /** Wizard v2 — chooses the wardrobe pool at prompt-compile time. */
+    readonly fashionStyle: string | null;
   };
   readonly personality: {
     readonly personalityFragment: string;

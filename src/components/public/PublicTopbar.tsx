@@ -1,8 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Menu, Heart, Sparkles, User } from "lucide-react";
-import { cn } from "@/shared/presentation/utils";
+import { Menu, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { UserMenu, type SessionUser } from "@/modules/identity/client";
 
@@ -11,23 +10,13 @@ interface PublicTopbarProps {
   onLoginClick: () => void;
   onSignupClick: () => void;
   onMobileMenuClick: () => void;
-  category: "girls" | "anime" | "guys";
-  onCategoryChange: (c: "girls" | "anime" | "guys") => void;
 }
-
-const categories = [
-  { id: "girls" as const, label: "Girls", icon: Heart },
-  { id: "anime" as const, label: "Anime", icon: Sparkles },
-  { id: "guys" as const, label: "Guys", icon: User },
-];
 
 export function PublicTopbar({
   user,
   onLoginClick,
   onSignupClick,
   onMobileMenuClick,
-  category,
-  onCategoryChange,
 }: PublicTopbarProps) {
   return (
     <header className="fixed top-0 left-0 right-0 h-16 border-b border-[#1e1e26] bg-[#0a0a0f]/95 backdrop-blur-xl z-50">
@@ -52,28 +41,13 @@ export function PublicTopbar({
         </div>
 
         <nav className="hidden sm:flex items-center gap-1">
-          {categories.map((cat) => {
-            const Icon = cat.icon;
-            const active = cat.id === category;
-            return (
-              <button
-                key={cat.id}
-                onClick={() => onCategoryChange(cat.id)}
-                className={cn(
-                  "relative flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors cursor-pointer",
-                  active
-                    ? "text-white"
-                    : "text-[#8a8a99] hover:text-white",
-                )}
-              >
-                <Icon className="h-4 w-4" />
-                {cat.label}
-                {active && (
-                  <span className="absolute -bottom-[17px] left-4 right-4 h-0.5 bg-pink-500 rounded-full" />
-                )}
-              </button>
-            );
-          })}
+          <Link
+            href="/create"
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-[#c4c2d4] hover:text-white transition-colors"
+          >
+            <Sparkles className="h-4 w-4" />
+            Create Character
+          </Link>
         </nav>
 
         <div className="flex items-center gap-2">

@@ -110,6 +110,35 @@ const envSchema = z.object({
     .transform((v) => Number.parseInt(v, 10))
     .pipe(z.number().int().positive()),
 
+  // Semantic (vector) memory — toggle + retrieval score weights. Toggle
+  // defaults to true; embedder is skipped automatically if OPENAI_API_KEY
+  // is missing so this is safe. Weights tune the four retrieval signals
+  // (lexical ts_rank_cd, entity overlap, recency decay, cosine similarity).
+  SEMANTIC_MEMORY_ENABLED: z
+    .union([z.literal("1"), z.literal("0"), z.literal("true"), z.literal("false")])
+    .default("true")
+    .transform((v) => v === "1" || v === "true"),
+  HYBRID_LEXICAL_WEIGHT: z
+    .string()
+    .default("2.0")
+    .transform((v) => Number.parseFloat(v))
+    .pipe(z.number().nonnegative()),
+  HYBRID_ENTITY_WEIGHT: z
+    .string()
+    .default("1.5")
+    .transform((v) => Number.parseFloat(v))
+    .pipe(z.number().nonnegative()),
+  HYBRID_RECENCY_WEIGHT: z
+    .string()
+    .default("1.0")
+    .transform((v) => Number.parseFloat(v))
+    .pipe(z.number().nonnegative()),
+  HYBRID_SEMANTIC_WEIGHT: z
+    .string()
+    .default("1.5")
+    .transform((v) => Number.parseFloat(v))
+    .pipe(z.number().nonnegative()),
+
   // Stripe (billing)
   STRIPE_SECRET_KEY: optionalString,
   STRIPE_PUBLISHABLE_KEY: optionalString,

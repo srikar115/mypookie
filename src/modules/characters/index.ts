@@ -12,9 +12,18 @@ export {
   createGetCharacterLookupsUseCase,
   createCreateCharacterDraftUseCase,
   createRegenerateCharacterImageUseCase,
+  createRegenerateCharacterTaglineUseCase,
   createCommitCharacterUseCase,
   createCharacterReadRepository,
+  createWizardPreviewRepository,
 } from "./composition/characters.dependencies";
+
+export type {
+  WizardOptionType,
+  WizardPreviewLookup,
+  WizardPreviewRow,
+  WizardPreviewRepository,
+} from "./application/ports/wizard-preview-repository";
 
 export type { CharacterDto } from "./application/dto/character.dto";
 export type { CharacterSummaryDto } from "./application/dto/character-summary.dto";

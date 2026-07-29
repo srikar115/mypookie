@@ -30,6 +30,14 @@ export interface ActorContext {
   readonly id: string;
   readonly email: string | null;
   readonly role: string;
+  /**
+   * The user's display name from the auth session (`session.user.name`),
+   * populated at signup. Nullable — legacy accounts and OAuth providers
+   * without a name field can leave it empty. Chat uses this as a fallback
+   * for USER PROFILE when memory hasn't captured the user's name yet, so
+   * the model can address them by name from turn one.
+   */
+  readonly displayName: string | null;
 }
 
 export interface ServerContext {
@@ -58,6 +66,7 @@ export async function getServerContext(): Promise<ServerContext> {
           id: (user as { id: string }).id,
           email: user.email ?? null,
           role: (user as { role?: string }).role ?? "USER",
+          displayName: user.name?.trim() ? user.name.trim() : null,
         }
       : null;
 

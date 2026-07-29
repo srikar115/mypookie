@@ -12,6 +12,7 @@ import {
 import { cn } from "@/shared/presentation/utils";
 import type { CharacterSummaryDto } from "@/modules/characters";
 import { MessageBubble, type ChatMessage } from "./MessageBubble";
+import { TypingIndicator } from "./TypingIndicator";
 import { useChatStream } from "../hooks/useChatStream";
 
 interface Props {
@@ -45,15 +46,27 @@ export function ChatConversation({
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const { messages, streaming, send, lastError } = useChatStream({
+  const { messages, streaming, reading, send, retry } = useChatStream({
     conversationId,
     initialMessages,
   });
 
-  // Auto-scroll on new message or on streaming delta. Compare length +
-  // tail-content so token streams keep the viewport pinned to the bottom.
+  // Index of the tail failed-assistant bubble (if any). Only that
+  // bubble gets an onRetry callback so older errors don't grow
+  // duplicate buttons — a common bug when the transcript scrolls up.
+  const tailFailedIndex = (() => {
+    const last = messages[messages.length - 1];
+    if (!last) return -1;
+    if (last.role !== "assistant") return -1;
+    if (!last.errorCode) return -1;
+    return messages.length - 1;
+  })();
+
+  // Auto-scroll on new message, streaming delta, or when the reading
+  // indicator flips on/off — anything that changes what's rendered at
+  // the bottom of the feed.
   const tail = messages[messages.length - 1];
-  const tailKey = `${messages.length}:${tail?.id ?? ""}:${tail?.text.length ?? 0}`;
+  const tailKey = `${messages.length}:${tail?.id ?? ""}:${tail?.text.length ?? 0}:${reading ? "r" : "-"}`;
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -86,9 +99,11 @@ export function ChatConversation({
   const disabled = !conversationId || streaming;
   const composerHelp = !conversationId
     ? "Loading conversation…"
-    : streaming
-      ? `${character.name} is typing…`
-      : null;
+    : reading
+      ? `${character.name} is reading…`
+      : streaming
+        ? `${character.name} is typing…`
+        : null;
 
   return (
     <section className="flex flex-1 flex-col min-w-0 bg-[#0a0a0f]">
@@ -105,7 +120,54 @@ export function ChatConversation({
         {messages.length === 0 && conversationId ? (
           <EmptyThread character={character} />
         ) : (
-          messages.map((m) => <MessageBubble key={m.id} message={m} />)
+          <>
+            {messages.map((m, i) => {
+              // Swap the empty streaming placeholder for a dedicated
+              // "typing" pill. As soon as the first token arrives we
+              // fall through to the normal bubble (which still shows a
+              // subtle cursor via message.streaming), so the transition
+              // is seamless.
+              const isTailStreamingEmpty =
+                i === messages.length - 1 &&
+                m.role === "assistant" &&
+                m.streaming === true &&
+                m.text.length === 0;
+              if (isTailStreamingEmpty) {
+                return (
+                  <TypingIndicator
+                    key={m.id}
+                    mode="typing"
+                    characterName={character.name}
+                    characterImageUrl={character.imageUrl}
+                  />
+                );
+              }
+              const isTailFailed = i === tailFailedIndex;
+              return (
+                <MessageBubble
+                  key={m.id}
+                  message={m}
+                  characterName={character.name}
+                  onRetry={isTailFailed ? () => void retry() : undefined}
+                />
+              );
+            })}
+            {/*
+              Reading beat — the hook holds the assistant bubble out of
+              the message list during this phase, so we render a
+              distinct pill here rather than swap on tail contents.
+              Anchored to a stable key so React doesn't rebuild the
+              subtree when other state (streaming, tail text) changes.
+            */}
+            {reading ? (
+              <TypingIndicator
+                key="reading-indicator"
+                mode="reading"
+                characterName={character.name}
+                characterImageUrl={character.imageUrl}
+              />
+            ) : null}
+          </>
         )}
       </div>
 
@@ -145,16 +207,9 @@ export function ChatConversation({
             <Send className="h-4 w-4" />
           </button>
         </div>
-        {(composerHelp || lastError) && (
-          <p
-            className={cn(
-              "mt-2 px-1 text-[11px]",
-              lastError ? "text-red-400" : "text-[#6b6b76]",
-            )}
-          >
-            {lastError ?? composerHelp}
-          </p>
-        )}
+        {composerHelp ? (
+          <p className="mt-2 px-1 text-[11px] text-[#6b6b76]">{composerHelp}</p>
+        ) : null}
       </form>
     </section>
   );

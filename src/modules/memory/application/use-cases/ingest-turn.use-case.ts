@@ -1,6 +1,7 @@
 import "server-only";
 import type { Clock } from "@/shared/application/clock";
 import { env } from "@/config/env";
+import type { Embedder } from "../ports/embedder";
 import type { FactExtractor } from "../ports/fact-extractor";
 import type { MemoryStore } from "../ports/memory-store";
 import type { RelationshipUpdater } from "../ports/relationship-updater";
@@ -25,6 +26,13 @@ export class IngestTurnUseCase {
     private readonly relationship: RelationshipUpdater,
     private readonly summarizer: SessionSummarizer,
     private readonly clock: Clock,
+    /**
+     * Nullable — semantic memory is opt-in per env (SEMANTIC_MEMORY_ENABLED)
+     * and requires OPENAI_API_KEY. When null, facts are still persisted, but
+     * their `embedding` column stays NULL and retrieval falls back to
+     * lexical + entity + recency for those rows.
+     */
+    private readonly embedder: Embedder | null,
   ) {}
 
   async execute(input: {
@@ -50,11 +58,18 @@ export class IngestTurnUseCase {
         assistantMessage: input.assistantMessage,
       });
       if (facts.length > 0) {
+        // Embed each fact's `content` in a single batched call before the
+        // insert. If the embedder isn't wired (semantic disabled or key
+        // missing) or the call fails, we log and persist NULL vectors —
+        // never let embedding failures block memory ingestion, since the
+        // 3-signal retrieval remains fully functional without them.
+        const embeddings = await embedFacts(this.embedder, facts);
         await this.memoryStore.insertFacts({
           userId: input.userId,
           characterId: input.characterId,
           sourceMessageId: input.sourceUserMessageId,
           drafts: facts,
+          embeddings,
           now,
         });
         const identityPatch = collectIdentityPatch(facts);
@@ -119,6 +134,23 @@ export class IngestTurnUseCase {
  * pinnable. Non-pinnable IDENTITY facts stay in memory_facts and surface
  * via retrieval.
  */
+async function embedFacts(
+  embedder: Embedder | null,
+  facts: readonly { readonly content: string }[],
+): Promise<(number[] | null)[] | undefined> {
+  if (!embedder || facts.length === 0) return undefined;
+  try {
+    const texts = facts.map((f) => f.content);
+    const vecs = await embedder.embed(texts);
+    // Defensive: the provider should return an aligned array, but pad with
+    // nulls if it doesn't so we never mis-align embedding <-> draft indexes.
+    return facts.map((_, i) => (Array.isArray(vecs[i]) ? vecs[i]! : null));
+  } catch (e) {
+    console.warn("[memory] fact embedding failed, persisting without vectors", e);
+    return facts.map(() => null);
+  }
+}
+
 function collectIdentityPatch(
   facts: readonly {
     readonly category: string;

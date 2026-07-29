@@ -1,11 +1,11 @@
 /**
  * Client-side public API for the chat module.
  *
- * The chat module currently has no domain / application / infrastructure
- * layers because there's no persistence yet — this is a UI-only scaffold
- * that consumes `CharacterSummaryDto` from the characters module. When
- * we introduce chat threads, messages, and LLM integration, those layers
- * land alongside this file and a corresponding server-side `index.ts`.
+ * Client components (e.g. the wizard) import server actions from here so
+ * cross-module wiring stays on the module barrel rather than reaching
+ * into `./presentation/actions/*` directly.
  */
 export { ChatWorkspace } from "./presentation/components/ChatWorkspace";
 export type { ChatWorkspaceProps } from "./presentation/components/ChatWorkspace";
+export { startOrLoadConversationAction } from "./presentation/actions/start-or-load-conversation.action";
+export type { StartOrLoadConversationResult } from "./presentation/actions/start-or-load-conversation.action";
