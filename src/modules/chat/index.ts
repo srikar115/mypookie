@@ -8,6 +8,7 @@ export type { ConversationDto } from "./application/dto/conversation.dto";
 export type { MessageDto, MessageRole, MessageStatus } from "./application/dto/message.dto";
 export type { MemoryContextProvider } from "./application/ports/memory-context-provider";
 export type { BuiltChatContext } from "./application/use-cases/build-chat-context.use-case";
+export type { BuiltOpenerContext } from "./application/use-cases/build-opener-context.use-case";
 
 export {
   ConversationAccessDeniedError,
@@ -24,4 +25,5 @@ export {
   createAppendUserMessageUseCase,
   createAppendAssistantMessageUseCase,
   createBuildChatContextUseCase,
+  createBuildOpenerContextUseCase,
 } from "./composition/chat.dependencies";

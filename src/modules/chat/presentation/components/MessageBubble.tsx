@@ -8,7 +8,7 @@ import {
   isRetryableChatError,
   type ChatErrorCode,
 } from "../lib/chat-error";
-import { TwemojiText } from "../lib/twemoji";
+import { MessageText, TwemojiText } from "../lib/twemoji";
 
 /**
  * Role literal matches the DB enum values ('user' | 'assistant' | 'system').
@@ -103,12 +103,18 @@ export function MessageBubble({ message, onRetry, characterName }: Props) {
       >
         {/* Text body — hidden entirely on error-only bubbles so we don't
             render an empty <p> above the friendly copy.
-            `TwemojiText` swaps native emoji glyphs for Twemoji SVGs so
-            Windows / older Android users see the same modern emojis
-            everyone else does. Plain text passes through untouched. */}
+            Assistant bubbles run through `MessageText` (Candy-style
+            purple italic on *action beats* + Twemoji swap on emojis).
+            User bubbles use plain `TwemojiText` — users don't write
+            asterisk RP actions, so highlighting them would be visually
+            noisy and semantically wrong on the pink pill. */}
         {message.text.length > 0 || message.streaming ? (
           <p className="whitespace-pre-wrap break-words">
-            <TwemojiText text={message.text} />
+            {isUser ? (
+              <TwemojiText text={message.text} />
+            ) : (
+              <MessageText text={message.text} />
+            )}
             {message.streaming ? (
               <span className="ml-0.5 inline-block h-3 w-1 translate-y-0.5 animate-pulse bg-white/70" />
             ) : null}

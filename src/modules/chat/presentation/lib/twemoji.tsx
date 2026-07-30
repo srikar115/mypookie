@@ -134,3 +134,96 @@ export function TwemojiText({ text }: { text: string }) {
     </>
   );
 }
+
+/**
+ * Split a chat body into alternating "text" and "action" segments.
+ *
+ * Roleplay models emit action beats wrapped in single asterisks, e.g.
+ *   *she leans in, her voice dropping* Are you okay?
+ *
+ * We highlight action beats in a soft italic purple to match Candy's
+ * visual convention — it reads as stage direction and makes the actual
+ * dialogue visually pop. Kept as its own tokenizer (not a Markdown
+ * parser) because we specifically want to ignore **bold** / ***italic
+ * bold*** — models sometimes fall into them and they'd render as
+ * broken half-styled fragments if we tried to be clever.
+ *
+ * Regex notes:
+ *  - `[^*\n]+` prevents a stray unbalanced `*` on the next line from
+ *    swallowing multiple paragraphs.
+ *  - Match is greedy WITHIN a line — safe because a single line rarely
+ *    has adjacent action beats without at least one space between.
+ *  - The captured group is the content WITHOUT the asterisks; we
+ *    re-emit the asterisks in the rendered output so the styled span
+ *    exactly matches Candy's look ("*she smiles*" in purple italic).
+ */
+const ACTION_BEAT_RE = /\*([^*\n]+)\*/g;
+
+type MessageSegment =
+  | { readonly kind: "text"; readonly content: string }
+  | { readonly kind: "action"; readonly content: string };
+
+export function splitMessageIntoSegments(text: string): MessageSegment[] {
+  if (!text) return [{ kind: "text", content: "" }];
+  const segments: MessageSegment[] = [];
+  let cursor = 0;
+  for (const match of text.matchAll(ACTION_BEAT_RE)) {
+    const start = match.index ?? 0;
+    if (start > cursor) {
+      segments.push({ kind: "text", content: text.slice(cursor, start) });
+    }
+    segments.push({ kind: "action", content: match[1] });
+    cursor = start + match[0].length;
+  }
+  if (cursor < text.length) {
+    segments.push({ kind: "text", content: text.slice(cursor) });
+  }
+  if (segments.length === 0) segments.push({ kind: "text", content: text });
+  return segments;
+}
+
+/**
+ * The rich chat renderer: action beats in italic purple, everything
+ * else in plain body text, emoji glyphs swapped to Twemoji SVGs
+ * throughout. Use this in `MessageBubble` instead of `TwemojiText`
+ * whenever we're rendering a companion's reply — user messages don't
+ * use asterisk conventions, so plain `TwemojiText` still works for
+ * their bubbles (though `MessageText` is a safe superset).
+ *
+ * Colour choice: `text-purple-300` (Tailwind #d8b4fe) matches Candy's
+ * light-lavender action-beat tone almost exactly and reads well on
+ * both the dark assistant bubble (#1a1a22) and the pink user bubble
+ * (unlikely case, but graceful).
+ */
+export function MessageText({ text }: { text: string }) {
+  const segments = useMemo(() => splitMessageIntoSegments(text), [text]);
+
+  return (
+    <>
+      {segments.map((seg, i) => {
+        const inner = renderTwemojiText(seg.content);
+        if (seg.kind === "action") {
+          return (
+            <em
+              key={i}
+              className="italic text-purple-300/90 font-normal"
+            >
+              *
+              {inner.map((n, j) => (
+                <Fragment key={j}>{n}</Fragment>
+              ))}
+              *
+            </em>
+          );
+        }
+        return (
+          <Fragment key={i}>
+            {inner.map((n, j) => (
+              <Fragment key={j}>{n}</Fragment>
+            ))}
+          </Fragment>
+        );
+      })}
+    </>
+  );
+}

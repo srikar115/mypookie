@@ -46,10 +46,69 @@ export function ChatConversation({
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const { messages, streaming, reading, send, retry } = useChatStream({
+  const { messages, streaming, reading, send, retry, initiateOpener } = useChatStream({
     conversationId,
     initialMessages,
   });
+
+  // ─── Character-initiated opener ────────────────────────────────
+  // When the chat view mounts (or the user switches to a fresh
+  // conversation), the character speaks first if the user hasn't.
+  // Two flavours:
+  //
+  //   Fresh thread (empty history)   → opener 2s after mount.
+  //   Revisit with stale tail        → opener 2s after mount, only
+  //                                    if the last assistant message
+  //                                    is at least 5 minutes old.
+  //
+  // Suppressed when:
+  //   - the composer already has a draft (user is typing)
+  //   - a stream or reading beat is already in flight
+  //   - we already fired one for this mount
+  //   - the last message is from the user (they're expecting a reply
+  //     from the previous send; auto-opener would ignore them)
+  //
+  // Idle threshold is intentionally short: Candy fires within about
+  // 1-2s. Any longer and the empty chat feels awkward.
+  const OPENER_IDLE_MS = 2000;
+  const OPENER_STALE_ASSISTANT_MS = 5 * 60 * 1000;
+  const openerFiredRef = useRef(false);
+  useEffect(() => {
+    if (!conversationId) return;
+    if (openerFiredRef.current) return;
+    if (streaming || reading) return;
+
+    // Snapshot the eligibility state at effect-run time so the
+    // timeout reads the latest values without triggering re-runs on
+    // every message. React's stale-closure isn't a bug here — it's
+    // the intended semantics.
+    const last = messages[messages.length - 1];
+    const eligible = (() => {
+      if (!last) return true; // fresh empty thread
+      if (last.role === "user") return false; // user is awaiting a reply
+      if (last.role !== "assistant") return false; // system or other — bail
+      const ageMs = Date.now() - last.at.getTime();
+      return ageMs >= OPENER_STALE_ASSISTANT_MS;
+    })();
+    if (!eligible) return;
+
+    const timer = setTimeout(() => {
+      // Re-check just before firing — the user might have started
+      // typing during the idle window.
+      if (draft.trim().length > 0) return;
+      if (streaming || reading) return;
+      openerFiredRef.current = true;
+      void initiateOpener();
+    }, OPENER_IDLE_MS);
+
+    return () => clearTimeout(timer);
+    // messages.length is in the deps so the "was the thread empty?"
+    // check re-runs once after initial hydration. `draft` is NOT in
+    // deps — checking it inside the timeout is enough (adding it
+    // would restart the timer on every keystroke, defeating the
+    // "user is typing" cancellation).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId, messages.length, streaming, reading]);
 
   // Index of the tail failed-assistant bubble (if any). Only that
   // bubble gets an onRetry callback so older errors don't grow

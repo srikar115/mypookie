@@ -8,7 +8,7 @@ import { parseChatErrorCode } from "../lib/chat-error";
  * useChatStream — owns the message list for a single conversation and the
  * SSE stream lifecycle.
  *
- * Send-side timeline (Candy.ai-style "human presence" simulation):
+ * Send-side timeline (Candy.ai / iMessage-style "human presence"):
  *
  *   ┌─ user hits Enter
  *   ├─ user message appears instantly
@@ -16,8 +16,17 @@ import { parseChatErrorCode } from "../lib/chat-error";
  *   │     UI shows a muted "<name> is reading…" line (no dots) —
  *   │     the character is silently absorbing what the user typed.
  *   ├─ empty assistant bubble inserted + `POST /api/chat/…/stream` fires
- *   │     UI switches to the pulsing "<name> is typing…" dots.
- *   └─ first text_delta → dots vanish, tokens stream into the bubble.
+ *   │     UI switches to the pulsing "<name> is typing…" dots and
+ *   │     STAYS there while tokens accumulate off-screen.
+ *   └─ on `done` → dots vanish, the finished reply appears in one shot.
+ *
+ * Design note — why we buffer instead of revealing tokens live:
+ *   Fast models (Cydonia @ 60+ tok/s over OpenRouter) deliver SSE deltas
+ *   in irregular ~20–100 token chunks. Rendering those live produces a
+ *   "text jumps in big steps" effect that reads worse than either real
+ *   char-by-char typewriter animation OR a clean "typing… → message"
+ *   swap. We pick the swap: it's the same UX pattern iMessage,
+ *   WhatsApp, and Signal use, and it hides jitter from users.
  *
  * The reading pause is client-only. It's a UX affordance, not a
  * server-side wait — the network request is deferred so that combined
@@ -52,6 +61,14 @@ interface UseChatStreamResult {
    * Returns silently when there's nothing to retry.
    */
   readonly retry: () => Promise<void>;
+  /**
+   * Fires the character-initiated opener flow. UI shows the typing
+   * indicator until the server responds with the composed message.
+   * Silently no-ops if a stream is already in flight or if there's no
+   * conversation loaded. Returns `true` if the opener was requested,
+   * `false` if the call was skipped for any reason.
+   */
+  readonly initiateOpener: () => Promise<boolean>;
   readonly lastError: string | null;
 }
 
@@ -260,8 +277,12 @@ export function useChatStream({
           buffer = events.remainder;
           for (const evt of events.parsed) {
             if (evt.type === "text_delta" && typeof evt.delta === "string") {
+              // Accumulate silently — DO NOT patch the bubble yet. The
+              // tail bubble is still `{ text: "", streaming: true }` so
+              // ChatConversation keeps painting the typing indicator.
+              // We only flip both fields (text + streaming) on `done`
+              // below, which reveals the finished reply in one shot.
               accumulated += evt.delta;
-              patchAssistant({ text: accumulated, streaming: true });
             } else if (evt.type === "done" && typeof evt.messageId === "string") {
               finalMessageId = evt.messageId;
             } else if (evt.type === "error") {
@@ -367,7 +388,81 @@ export function useChatStream({
     await runSend(prompt, { resend: true });
   }, [conversationId, streaming, runSend]);
 
-  return { messages, streaming, reading, send, retry, lastError };
+  const initiateOpener = useCallback(async (): Promise<boolean> => {
+    // Refuse if there's no thread yet or a turn is already in-flight.
+    // The caller (ChatConversation) is also gated on these flags, but
+    // this defensive check makes the hook safe to call from anywhere.
+    if (!conversationId || streaming || reading) return false;
+
+    // Insert an empty streaming assistant bubble to drive the typing
+    // indicator. Same visual as a normal turn: dots stay until we
+    // splice in the finished text.
+    const assistantTempId = `temp-opener-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setStreaming(true);
+    setLastError(null);
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: assistantTempId,
+        role: "assistant",
+        text: "",
+        at: new Date(),
+        streaming: true,
+      },
+    ]);
+
+    try {
+      const res = await fetch(`/api/chat/${conversationId}/opener`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const body = (await res.json().catch(() => null)) as
+        | {
+            ok?: boolean;
+            message?: { id: string; content: string; createdAt: string };
+            error?: string;
+            code?: string;
+          }
+        | null;
+
+      if (!res.ok || !body?.ok || !body.message) {
+        // Opener failed — quietly strip the placeholder rather than
+        // showing an error bubble. Openers are opportunistic; if the
+        // model burped, better to say nothing than pester the user.
+        setMessages((prev) =>
+          prev.filter((m) => m.id !== assistantTempId),
+        );
+        setLastError(body?.code ?? `HTTP ${res.status}`);
+        return false;
+      }
+
+      // Swap the temp placeholder for the finished message. Match
+      // exactly the shape of a normal completed assistant bubble so
+      // downstream code (retry gating, error rendering) treats it
+      // identically.
+      const finalId = body.message.id;
+      const finalText = body.message.content;
+      const finalAt = new Date(body.message.createdAt);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantTempId
+            ? { ...m, id: finalId, streaming: false, text: finalText, at: finalAt }
+            : m,
+        ),
+      );
+      return true;
+    } catch (e) {
+      // Network blip — same silent-strip policy as above. Nothing to
+      // show, nothing to retry; the user hasn't done anything yet.
+      setMessages((prev) => prev.filter((m) => m.id !== assistantTempId));
+      setLastError(e instanceof Error ? e.message : "network");
+      return false;
+    } finally {
+      setStreaming(false);
+    }
+  }, [conversationId, streaming, reading]);
+
+  return { messages, streaming, reading, send, retry, initiateOpener, lastError };
 }
 
 /**

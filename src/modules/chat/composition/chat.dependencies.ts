@@ -10,6 +10,7 @@ import { ListMessagesUseCase } from "../application/use-cases/list-messages.use-
 import { AppendUserMessageUseCase } from "../application/use-cases/append-user-message.use-case";
 import { AppendAssistantMessageUseCase } from "../application/use-cases/append-assistant-message.use-case";
 import { BuildChatContextUseCase } from "../application/use-cases/build-chat-context.use-case";
+import { BuildOpenerContextUseCase } from "../application/use-cases/build-opener-context.use-case";
 import type { MemoryContextProvider } from "../application/ports/memory-context-provider";
 import type { ConversationRepository } from "../application/ports/conversation-repository";
 import type { MessageRepository } from "../application/ports/message-repository";
@@ -90,6 +91,20 @@ export function createBuildChatContextUseCase(
   memory: MemoryContextProvider,
 ): BuildChatContextUseCase {
   return new BuildChatContextUseCase(
+    createConversationRepository(ctx),
+    createMessageRepository(ctx),
+    createChatCharacterProvider(ctx),
+    memory,
+    new TemplatePromptComposer(),
+    env.CHAT_MAX_HISTORY_TURNS,
+  );
+}
+
+export function createBuildOpenerContextUseCase(
+  ctx: ServerContext,
+  memory: MemoryContextProvider,
+): BuildOpenerContextUseCase {
+  return new BuildOpenerContextUseCase(
     createConversationRepository(ctx),
     createMessageRepository(ctx),
     createChatCharacterProvider(ctx),
