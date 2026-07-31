@@ -3,6 +3,8 @@
 import { useCallback, useRef, useState } from "react";
 import type { ChatMessage } from "../components/MessageBubble";
 import { parseChatErrorCode } from "../lib/chat-error";
+import { dtoToChatMessage } from "../lib/dto-mapper";
+import { listMessagesAction } from "../actions/list-messages.action";
 
 /**
  * useChatStream — owns the message list for a single conversation and the
@@ -69,6 +71,17 @@ interface UseChatStreamResult {
    * `false` if the call was skipped for any reason.
    */
   readonly initiateOpener: () => Promise<boolean>;
+  /**
+   * Re-fetches the full recent history from the server and replaces
+   * the in-memory message list. Used after a voice call ends so the
+   * spoken turns (persisted by the LiveKit agent worker) and the
+   * "Live Phone Call ended" marker (persisted by EndCallUseCase)
+   * flow into the transcript without a full page reload.
+   *
+   * No-op while a text stream is in flight — the SSE stream owns the
+   * tail bubble and clobbering it would strand tokens.
+   */
+  readonly refresh: () => Promise<void>;
   readonly lastError: string | null;
 }
 
@@ -462,7 +475,36 @@ export function useChatStream({
     }
   }, [conversationId, streaming, reading]);
 
-  return { messages, streaming, reading, send, retry, initiateOpener, lastError };
+  const refresh = useCallback(async (): Promise<void> => {
+    if (!conversationId) return;
+    // Never clobber the tail while a stream is running — the SSE loop
+    // is authoritative for that bubble.
+    if (streaming || reading) return;
+    try {
+      const result = await listMessagesAction({ conversationId, limit: 50 });
+      if (!result.ok) return;
+      const server = result.messages.map(dtoToChatMessage);
+      // Preserve any temp/optimistic rows the user might still see
+      // (shouldn't happen given the streaming guard, but defensive).
+      setMessages((prev) => {
+        const temps = prev.filter((m) => m.id.startsWith("temp-"));
+        return temps.length === 0 ? server : [...server, ...temps];
+      });
+    } catch (e) {
+      console.warn("[useChatStream] refresh failed", e);
+    }
+  }, [conversationId, streaming, reading]);
+
+  return {
+    messages,
+    streaming,
+    reading,
+    send,
+    retry,
+    initiateOpener,
+    refresh,
+    lastError,
+  };
 }
 
 /**

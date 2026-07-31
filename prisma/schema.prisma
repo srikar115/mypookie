@@ -33,6 +33,11 @@ model User {
   signupIp                String?
   signupUserAgent         String?
 
+  // Voice-call beta allowlist. Gate flipped on per-user by admins during the
+  // first two weeks after launch, then removed once we're confident in the
+  // provider bill and drop-reason distribution.
+  voiceCallsBeta Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -48,6 +53,7 @@ model User {
   relationshipStates     RelationshipState[]
   relationshipMilestones RelationshipMilestone[]
   modelConfigUpdates     ModelConfig[]           @relation("ModelConfigUpdatedBy")
+  callSessions           CallSession[]
 
   @@index([email])
   @@index([status])
@@ -287,6 +293,7 @@ model Character {
   memoryFacts            MemoryFact[]
   relationshipStates     RelationshipState[]
   relationshipMilestones RelationshipMilestone[]
+  callSessions           CallSession[]
 
   @@index([ownerUserId])
   @@index([ownerUserId, status])
@@ -529,6 +536,13 @@ enum ModelPurpose {
   // stronger creative-writing model (gpt-4o, Claude Haiku, etc.)
   // separately from the memory extractor.
   TAGLINE_GENERATOR
+  // Voice-call pipeline. Three separate purposes because STT / LLM / TTS
+  // each live at different providers and get tuned independently. The LLM
+  // is a distinct row from CHAT so admins can point voice at a `:nitro`
+  // variant for latency without disturbing text-chat routing.
+  VOICE_STT
+  VOICE_LLM
+  VOICE_TTS
 }
 
 enum ModelProvider {
@@ -536,6 +550,9 @@ enum ModelProvider {
   OPENAI
   ANTHROPIC
   FAL
+  DEEPGRAM
+  CARTESIA
+  LIVEKIT
 }
 
 // ─── Chat ─────────────────────────────────────────────────────────────────────
@@ -550,10 +567,11 @@ model Conversation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-  character Character            @relation(fields: [characterId], references: [id], onDelete: Cascade)
-  messages  Message[]
-  summary   ConversationSummary?
+  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character    Character            @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  messages     Message[]
+  summary      ConversationSummary?
+  callSessions CallSession[]
 
   @@unique([userId, characterId])
   @@index([userId, lastMessageAt(sort: Desc)])
@@ -573,6 +591,16 @@ model Message {
   modelId        String?
   errorMessage   String?
 
+  // Voice-call plumbing. `source` distinguishes typed turns from spoken turns
+  // so the composer knows whether the user actually saw the text or heard it
+  // spoken (matters for how we replay a mixed thread). `audioR2Key` points at
+  // the R2 blob (user's mic capture OR TTS output) when we're recording; null
+  // for text turns. `ttsMarkupTags` captures the Cartesia inline markers the
+  // LLM emitted (`[laugh]`, `[sigh]`, ...) for later analytics.
+  source        MessageSource @default(TEXT)
+  audioR2Key    String?
+  ttsMarkupTags String[]      @default([])
+
   createdAt DateTime @default(now())
 
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -591,6 +619,11 @@ enum MessageRole {
 enum MessageStatus {
   READY
   FAILED
+}
+
+enum MessageSource {
+  TEXT
+  VOICE
 }
 
 model ConversationSummary {
@@ -733,4 +766,48 @@ model WizardOptionPreview {
   @@unique([optionType, optionValue, baseStyle, gender], map: "wizard_option_previews_unique")
   @@index([baseStyle, gender, optionType], map: "wizard_option_previews_style_gender_idx")
   @@map("wizard_option_previews")
+}
+
+// ─── Voice calls ──────────────────────────────────────────────────────────────
+//
+// One row per real-time call between a user and a character. The row is created
+// eagerly at `POST /call/token` (so the concurrent-call guard has something to
+// check) and finalized on hang-up. Turn transcripts land in `messages` with
+// `source=VOICE` and share the parent `conversationId`, so a mixed
+// text-and-voice thread reads back as one continuous conversation.
+
+model CallSession {
+  id             String    @id @default(uuid()) @db.Uuid
+  conversationId String    @db.Uuid
+  userId         String    @db.Uuid
+  characterId    String    @db.Uuid
+  // LiveKit room name — we mint it deterministically as `call_<sessionId>` so
+  // both the token issuer and the agent worker can derive it without an extra
+  // round trip.
+  livekitRoom    String    @unique
+  startedAt      DateTime  @default(now())
+  endedAt        DateTime?
+  durationSec    Int?
+  turnCount      Int       @default(0)
+  costCredits    Int       @default(0)
+  // "user_hangup" | "user_disconnect" | "credit_exhausted" | "provider_error" |
+  // "daily_cap_reached" | "concurrent_call_limit" — free-form so we can add
+  // reasons without a migration.
+  dropReason     String?
+  // 2-sentence LLM recap generated in `after()` on hang-up. Feeds the memory
+  // block on subsequent turns so the character can naturally say "That was a
+  // nice call yesterday."
+  summary        String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character    Character    @relation(fields: [characterId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, startedAt(sort: Desc)])
+  @@index([userId, startedAt(sort: Desc)])
+  @@index([userId, endedAt])
+  @@map("call_sessions")
 }

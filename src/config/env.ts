@@ -139,6 +139,57 @@ const envSchema = z.object({
     .transform((v) => Number.parseFloat(v))
     .pipe(z.number().nonnegative()),
 
+  // Voice calls — LiveKit transport + Deepgram STT + Cartesia TTS.
+  // All optional at the schema level; enforced together via
+  // assertVoiceConfigIfEnabled() when VOICE_CALLS_ENABLED is true.
+  VOICE_CALLS_ENABLED: z
+    .union([z.literal("1"), z.literal("0"), z.literal("true"), z.literal("false")])
+    .default("false")
+    .transform((v) => v === "1" || v === "true"),
+  LIVEKIT_URL: optionalString,
+  LIVEKIT_API_KEY: optionalString,
+  LIVEKIT_API_SECRET: optionalString,
+  LIVEKIT_AGENT_URL: optionalString,
+  LIVEKIT_WEBHOOK_KEY: optionalString,
+  DEEPGRAM_API_KEY: optionalString,
+  CARTESIA_API_KEY: optionalString,
+  // Cartesia voice IDs picked per character gender. Cartesia splits
+  // their catalogue into "Stable" voices (best for support-desk
+  // agents) and "Emotive" voices (best for AI characters, companion
+  // apps, and game NPCs). Companion voices belong in the Emotive tier
+  // — Stable voices sound flat and IVR-ish. Defaults below come
+  // straight from Cartesia's own character-tier recommendation:
+  //
+  //   Female: Tessa — 6ccbfb76-1fc6-48f7-b71d-91ac6298247b
+  //     Warm, expressive, laughter-capable. Alternatives: Ariana, Lucy.
+  //   Male:   Kyle  — c961b81c-a935-4c17-bfb3-ba2239de8c2f
+  //     Grounded, playful. Alternatives: Cory, Nolan.
+  //
+  // Long term these should be seeded into `voice_presets` per character
+  // so different characters can have different voices even at the same
+  // gender. Env-level defaults are the fallback picker.
+  CARTESIA_VOICE_ID_FEMALE: z
+    .string()
+    .default("6ccbfb76-1fc6-48f7-b71d-91ac6298247b"),
+  CARTESIA_VOICE_ID_MALE: z
+    .string()
+    .default("c961b81c-a935-4c17-bfb3-ba2239de8c2f"),
+  CARTESIA_VOICE_ID_NONBINARY: optionalString,
+  VOICE_CREDITS_PER_MINUTE: z
+    .string()
+    .default("5")
+    .transform((v) => Number.parseInt(v, 10))
+    .pipe(z.number().int().positive()),
+  VOICE_MAX_DAILY_MINUTES: z
+    .string()
+    .default("60")
+    .transform((v) => Number.parseInt(v, 10))
+    .pipe(z.number().int().positive()),
+  NEXT_PUBLIC_VOICE_CALLS_ENABLED: z
+    .union([z.literal("1"), z.literal("0"), z.literal("true"), z.literal("false")])
+    .default("false")
+    .transform((v) => v === "1" || v === "true"),
+
   // Stripe (billing)
   STRIPE_SECRET_KEY: optionalString,
   STRIPE_PUBLISHABLE_KEY: optionalString,
@@ -185,6 +236,29 @@ function assertR2ConfigIfEnabled(parsed: z.infer<typeof envSchema>): void {
   }
 }
 
+/**
+ * When VOICE_CALLS_ENABLED is true, LiveKit + Deepgram + Cartesia keys and the
+ * agent worker URL must all be present. The webhook shared-secret is required
+ * too — it signs agent → web callbacks so the turn persistence endpoint cannot
+ * be forged from the public internet.
+ */
+function assertVoiceConfigIfEnabled(parsed: z.infer<typeof envSchema>): void {
+  if (!parsed.VOICE_CALLS_ENABLED) return;
+  const missing: string[] = [];
+  if (!parsed.LIVEKIT_URL) missing.push("LIVEKIT_URL");
+  if (!parsed.LIVEKIT_API_KEY) missing.push("LIVEKIT_API_KEY");
+  if (!parsed.LIVEKIT_API_SECRET) missing.push("LIVEKIT_API_SECRET");
+  if (!parsed.LIVEKIT_AGENT_URL) missing.push("LIVEKIT_AGENT_URL");
+  if (!parsed.LIVEKIT_WEBHOOK_KEY) missing.push("LIVEKIT_WEBHOOK_KEY");
+  if (!parsed.DEEPGRAM_API_KEY) missing.push("DEEPGRAM_API_KEY");
+  if (!parsed.CARTESIA_API_KEY) missing.push("CARTESIA_API_KEY");
+  if (missing.length) {
+    throw new Error(
+      `[config/env] VOICE_CALLS_ENABLED=true but missing: ${missing.join(", ")}`,
+    );
+  }
+}
+
 function parseEnv(): z.infer<typeof envSchema> {
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
@@ -197,6 +271,7 @@ function parseEnv(): z.infer<typeof envSchema> {
     );
   }
   assertR2ConfigIfEnabled(parsed.data);
+  assertVoiceConfigIfEnabled(parsed.data);
   return parsed.data;
 }
 

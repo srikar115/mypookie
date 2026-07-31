@@ -4,16 +4,24 @@ import { useEffect, useRef, useState } from "react";
 import {
   Gift,
   MoreHorizontal,
-  Phone,
   PanelRightOpen,
   Send,
   SlidersHorizontal,
 } from "lucide-react";
 import { cn } from "@/shared/presentation/utils";
 import type { CharacterSummaryDto } from "@/modules/characters";
+import { VoiceCallButton, useVoiceCall } from "@/modules/voice/client";
 import { MessageBubble, type ChatMessage } from "./MessageBubble";
+import { CallEndedMarker } from "./CallEndedMarker";
 import { TypingIndicator } from "./TypingIndicator";
 import { useChatStream } from "../hooks/useChatStream";
+
+// Public feature flag so the client can hide the phone button entirely
+// until voice calls are launched globally. NEXT_PUBLIC_* is inlined by
+// Next.js at build time.
+const VOICE_CALLS_ENABLED =
+  process.env.NEXT_PUBLIC_VOICE_CALLS_ENABLED === "true" ||
+  process.env.NEXT_PUBLIC_VOICE_CALLS_ENABLED === "1";
 
 interface Props {
   readonly character: CharacterSummaryDto;
@@ -46,10 +54,42 @@ export function ChatConversation({
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const { messages, streaming, reading, send, retry, initiateOpener } = useChatStream({
-    conversationId,
-    initialMessages,
-  });
+  const { messages, streaming, reading, send, retry, initiateOpener, refresh } =
+    useChatStream({
+      conversationId,
+      initialMessages,
+    });
+
+  // ─── Voice call plumbing ──────────────────────────────────────
+  // Hoisted here (rather than inside VoiceCallButton) for two reasons:
+  //   1. When the call ends we need to refresh the transcript so the
+  //      voice turns persisted by the agent worker (and the boundary
+  //      marker persisted by EndCallUseCase) flow into the message list.
+  //   2. The CallEndedMarker's "Speak again" button re-starts the same
+  //      call, which is easiest to model as a signal counter that the
+  //      button watches.
+  const call = useVoiceCall();
+  const [speakAgainSignal, setSpeakAgainSignal] = useState(0);
+  const prevCallStateRef = useRef(call.state);
+  useEffect(() => {
+    const prev = prevCallStateRef.current;
+    prevCallStateRef.current = call.state;
+    // Refresh once, on the falling edge into `ended`. `error` we skip —
+    // if the call never connected, nothing new to render. Small delay
+    // lets the LiveKit agent's final /voice-agent/turn POST land before
+    // we re-fetch (the agent posts fire-and-forget so this is a race
+    // we bias by ~700ms rather than solving with polling).
+    if (prev !== "ended" && call.state === "ended") {
+      const t = setTimeout(() => {
+        void refresh();
+      }, 700);
+      return () => clearTimeout(t);
+    }
+  }, [call.state, refresh]);
+  const handleSpeakAgain = () => {
+    if (!conversationId) return;
+    setSpeakAgainSignal((n) => n + 1);
+  };
 
   // ─── Character-initiated opener ────────────────────────────────
   // When the chat view mounts (or the user switches to a fresh
@@ -170,6 +210,9 @@ export function ChatConversation({
         character={character}
         detailOpen={detailOpen}
         onToggleDetail={onToggleDetail}
+        conversationId={conversationId}
+        call={call}
+        speakAgainSignal={speakAgainSignal}
       />
 
       <div
@@ -181,6 +224,27 @@ export function ChatConversation({
         ) : (
           <>
             {messages.map((m, i) => {
+              // Call-boundary marker rows render as a distinct pill
+              // (phone-off + duration + Speak again) rather than a
+              // MessageBubble. Only the tail marker gets the button —
+              // older markers stay as passive receipts so the
+              // transcript doesn't sprout dozens of "Speak again"
+              // affordances.
+              if (m.kind === "call_ended") {
+                const isTailMarker = i === messages.length - 1;
+                return (
+                  <CallEndedMarker
+                    key={m.id}
+                    durationSec={m.durationSec ?? 0}
+                    at={m.at}
+                    onSpeakAgain={
+                      isTailMarker && conversationId
+                        ? handleSpeakAgain
+                        : undefined
+                    }
+                  />
+                );
+              }
               // Swap the empty streaming placeholder for a dedicated
               // "typing" pill. As soon as the first token arrives we
               // fall through to the normal bubble (which still shows a
@@ -294,10 +358,16 @@ function ConversationHeader({
   character,
   detailOpen,
   onToggleDetail,
+  conversationId,
+  call,
+  speakAgainSignal,
 }: {
   character: CharacterSummaryDto;
   detailOpen: boolean;
   onToggleDetail: () => void;
+  conversationId: string | null;
+  call: ReturnType<typeof useVoiceCall>;
+  speakAgainSignal: number;
 }) {
   return (
     <header className="flex items-center gap-3 border-b border-[#1e1e26] px-4 md:px-6 py-3">
@@ -317,9 +387,14 @@ function ConversationHeader({
         </div>
       </div>
       <div className="flex items-center gap-1 text-[#c4c2d4]">
-        <IconButton title="Voice call (coming soon)" disabled>
-          <Phone className="h-4 w-4" />
-        </IconButton>
+        <VoiceCallButton
+          conversationId={conversationId}
+          characterName={character.name}
+          characterImageUrl={character.imageUrl}
+          enabled={VOICE_CALLS_ENABLED}
+          call={call}
+          openSignal={speakAgainSignal}
+        />
         <IconButton title="More options">
           <MoreHorizontal className="h-4 w-4" />
         </IconButton>

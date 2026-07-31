@@ -5,18 +5,24 @@
  */
 export type MessageRole = "USER" | "ASSISTANT" | "SYSTEM";
 export type MessageStatus = "READY" | "FAILED";
+export type MessageSource = "TEXT" | "VOICE";
 
 /**
  * MessageDto — provider-agnostic message shape read by the UI and the
  * streaming route. The `role` values mirror the DB enum ('USER',
  * 'ASSISTANT', 'SYSTEM') so no translation layer sits between the wire and
  * persistence.
+ *
+ * `source` distinguishes typed turns from spoken turns. The chat UI uses
+ * this to show a small phone glyph on voice messages so the transcript
+ * reads like a mixed text/voice conversation.
  */
 export interface MessageDto {
   readonly id: string;
   readonly conversationId: string;
   readonly role: MessageRole;
   readonly status: MessageStatus;
+  readonly source: MessageSource;
   readonly content: string;
   readonly tokensIn: number | null;
   readonly tokensOut: number | null;

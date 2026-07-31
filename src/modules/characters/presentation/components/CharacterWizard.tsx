@@ -116,10 +116,30 @@ export function CharacterWizard({
     }
   };
 
-  const submit = () =>
+  const submit = () => {
+    // ── React 19 async-transition gotcha ─────────────────────────
+    // State updates inside `startTransition(async () => ...)` get
+    // batched with the whole transition and don't flush until the
+    // async callback resolves. That means if we set `step: "progress"`
+    // *inside* the transition, the ProgressScreen never appears —
+    // the wizard sits on the details step until the round-trip
+    // finishes, then jumps straight to the chat page.
+    //
+    // Fix: hoist the pre-flight state updates OUT of the transition
+    // so React commits them urgently. `startSubmit` still owns the
+    // isSubmitting flag while the async work runs.
+    setError(null);
+    setStep("progress");
+
     startSubmit(async () => {
-      setError(null);
-      setStep("progress");
+      // Minimum display time for the progress screen — even if the
+      // whole round-trip is instant (warm caches, cached auth, etc.),
+      // we want the user to feel the "creation" moment. Candy.ai
+      // does the same thing; ~1.5s feels satisfying without being
+      // draggy. If the network takes longer, this is a no-op.
+      const MIN_PROGRESS_MS = 1500;
+      const started = Date.now();
+
       const payload = {
         name: draft.name,
         appearance: {
@@ -167,11 +187,21 @@ export function CharacterWizard({
         setStep("details");
         return;
       }
+
+      // Wait out the minimum display window before redirecting so
+      // the ProgressScreen animation has time to breathe. Only sleeps
+      // if the round-trip finished ahead of the floor.
+      const elapsed = Date.now() - started;
+      if (elapsed < MIN_PROGRESS_MS) {
+        await new Promise((r) => setTimeout(r, MIN_PROGRESS_MS - elapsed));
+      }
+
       const slug = slugifyName(draft.name);
       router.push(
         `/ai-girlfriend/${slug}?conversation_id=${convo.conversation.id}`,
       );
     });
+  };
 
   if (step === "progress") {
     return <ProgressScreen name={draft.name} />;

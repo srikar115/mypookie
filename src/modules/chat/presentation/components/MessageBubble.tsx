@@ -1,6 +1,6 @@
 "use client";
 
-import { RotateCcw } from "lucide-react";
+import { Phone, RotateCcw } from "lucide-react";
 import { cn } from "@/shared/presentation/utils";
 import { formatClock } from "./format";
 import {
@@ -12,17 +12,35 @@ import { MessageText, TwemojiText } from "../lib/twemoji";
 
 /**
  * Role literal matches the DB enum values ('user' | 'assistant' | 'system').
- * SYSTEM messages are never rendered — the streaming route filters them out
- * on read, but keep the value in the union so future admin/whisper events
- * don't require a type change.
+ * SYSTEM is used for call-boundary markers (see {@link ChatMessage.kind});
+ * regular text SYSTEM rows aren't rendered.
  */
 export type MessageRole = "user" | "assistant" | "system";
+
+/**
+ * `source` distinguishes typed turns from spoken turns. Voice-sourced
+ * bubbles render a small phone glyph so the transcript reads like a
+ * mixed text/voice conversation (Candy AI convention).
+ */
+export type MessageSource = "text" | "voice";
+
+/**
+ * Non-conversational rows we render as inline UI (call boundaries etc.).
+ * A ChatMessage with `kind` set is treated by the renderer as a marker,
+ * not a text bubble.
+ */
+export type ChatMessageKind = "call_ended";
 
 export interface ChatMessage {
   readonly id: string;
   readonly role: MessageRole;
   readonly text: string;
   readonly at: Date;
+  readonly source?: MessageSource;
+  /** Marker discriminator — when present, this row is rendered as a UI chrome pill, not a bubble. */
+  readonly kind?: ChatMessageKind;
+  /** Populated for `kind === "call_ended"` markers. */
+  readonly durationSec?: number;
   /**
    * When true, this is a placeholder assistant bubble waiting on tokens.
    * The bubble renders a tiny animated cursor instead of an empty pill.
@@ -69,6 +87,7 @@ interface Props {
  */
 export function MessageBubble({ message, onRetry, characterName }: Props) {
   const isUser = message.role === "user";
+  const isVoice = message.source === "voice";
   const hasError =
     (message.errorCode !== null && message.errorCode !== undefined) ||
     (message.errorMessage !== null &&
@@ -101,6 +120,20 @@ export function MessageBubble({ message, onRetry, characterName }: Props) {
             : "bg-[#1a1a22] text-white/95 rounded-bl-md",
         )}
       >
+        {/* Voice-source label — inline phone glyph tells the user this
+            bubble was spoken during a live call rather than typed. Placed
+            above the text so the metadata reads naturally left-to-right. */}
+        {isVoice ? (
+          <div
+            className={cn(
+              "mb-1 inline-flex items-center gap-1 text-[11px] font-medium",
+              isUser ? "text-white/80" : "text-pink-300/90",
+            )}
+          >
+            <Phone className="h-3 w-3" />
+            <span>Voice</span>
+          </div>
+        ) : null}
         {/* Text body — hidden entirely on error-only bubbles so we don't
             render an empty <p> above the friendly copy.
             Assistant bubbles run through `MessageText` (Candy-style

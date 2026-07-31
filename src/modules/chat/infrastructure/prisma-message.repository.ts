@@ -125,6 +125,7 @@ function toDto(row: Message): MessageDto {
     conversationId: row.conversationId,
     role: row.role,
     status: row.status,
+    source: row.source,
     content: row.content,
     tokensIn: row.tokensIn,
     tokensOut: row.tokensOut,

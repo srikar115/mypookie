@@ -31,11 +31,19 @@ export class PrismaChatCharacterProvider implements ChatCharacterProvider {
         id: true,
         ownerUserId: true,
         name: true,
+        gender: true,
         systemPrompt: true,
         tagline: true,
         relationshipArchetype: { select: { displayName: true } },
         personalityArchetype: { select: { displayName: true } },
         occupation: { select: { displayName: true } },
+        voicePreset: {
+          select: {
+            provider: true,
+            providerVoiceId: true,
+            language: true,
+          },
+        },
       },
     });
     if (!row) return null;
@@ -43,11 +51,19 @@ export class PrismaChatCharacterProvider implements ChatCharacterProvider {
       id: row.id,
       ownerUserId: row.ownerUserId,
       name: row.name,
+      gender: row.gender,
       systemPrompt: row.systemPrompt,
       tagline: row.tagline,
       relationshipLabel: row.relationshipArchetype.displayName,
       personalityLabel: row.personalityArchetype.displayName,
       occupationLabel: row.occupation.displayName,
+      voicePreset: row.voicePreset
+        ? {
+            provider: row.voicePreset.provider,
+            providerVoiceId: row.voicePreset.providerVoiceId,
+            language: row.voicePreset.language,
+          }
+        : null,
     };
   }
 }

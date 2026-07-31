@@ -128,9 +128,16 @@ export async function POST(
 
   const finalContent = content.trim();
   if (finalContent.length === 0) {
-    // Empty completion is functionally the same as a failure — mark
-    // the placeholder failed so the client doesn't render an empty
-    // bubble. Rare in practice.
+    // Empty completion. Most common cause: the model's chat template
+    // requires a trailing user turn (see `composeOpener` in the
+    // composer). If this fires despite that fix, something more
+    // interesting is happening — probably a moderation refusal on
+    // the character or memory content. Log the raw length + the
+    // resolved model so the pattern is diagnosable from a tail of
+    // the dev log.
+    console.warn(
+      `[chat.opener] empty completion (model=${chatModel.modelId}, raw_len=${content.length}) — see composeOpener() if this repeats`,
+    );
     await appendAssistant.fail({
       messageId: placeholder.id,
       errorMessage: "empty_completion",

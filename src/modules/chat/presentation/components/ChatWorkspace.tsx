@@ -11,6 +11,7 @@ import { ChatConversation } from "./ChatConversation";
 import { ChatDetail } from "./ChatDetail";
 import type { ChatMessage } from "./MessageBubble";
 import type { MessageDto } from "../../application/dto/message.dto";
+import { dtoToChatMessage } from "../lib/dto-mapper";
 
 export interface ChatWorkspaceProps {
   readonly characters: readonly CharacterSummaryDto[];
@@ -227,15 +228,7 @@ export function ChatWorkspace({
   );
 }
 
-function toChatMessage(m: MessageDto): ChatMessage {
-  return {
-    id: m.id,
-    role: m.role === "USER" ? "user" : m.role === "ASSISTANT" ? "assistant" : "system",
-    text: m.content,
-    at: new Date(m.createdAt),
-    errorMessage: m.errorMessage,
-  };
-}
+const toChatMessage = dtoToChatMessage;
 
 function EmptyWorkspace() {
   return (

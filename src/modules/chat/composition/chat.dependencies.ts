@@ -15,6 +15,7 @@ import type { MemoryContextProvider } from "../application/ports/memory-context-
 import type { ConversationRepository } from "../application/ports/conversation-repository";
 import type { MessageRepository } from "../application/ports/message-repository";
 import type { ChatCharacterProvider } from "../application/ports/chat-character-provider";
+import type { PromptComposer } from "../application/ports/prompt-composer";
 
 /**
  * Composition factories for the chat module. The ONLY file allowed to see
@@ -42,6 +43,16 @@ export function createChatCharacterProvider(
   ctx: ServerContext,
 ): ChatCharacterProvider {
   return new PrismaChatCharacterProvider(ctx.db);
+}
+
+/**
+ * Shared unified composer. Text-chat AND voice-call context builders
+ * both instantiate this factory so the character never sounds
+ * different across channels. See `PromptComposer` port for docs and
+ * `mode: "text" | "voice"` semantics.
+ */
+export function createPromptComposer(): PromptComposer {
+  return new TemplatePromptComposer();
 }
 
 export function createStartOrLoadConversationUseCase(
@@ -95,7 +106,7 @@ export function createBuildChatContextUseCase(
     createMessageRepository(ctx),
     createChatCharacterProvider(ctx),
     memory,
-    new TemplatePromptComposer(),
+    createPromptComposer(),
     env.CHAT_MAX_HISTORY_TURNS,
   );
 }
@@ -109,7 +120,7 @@ export function createBuildOpenerContextUseCase(
     createMessageRepository(ctx),
     createChatCharacterProvider(ctx),
     memory,
-    new TemplatePromptComposer(),
+    createPromptComposer(),
     env.CHAT_MAX_HISTORY_TURNS,
   );
 }
