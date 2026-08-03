@@ -27,6 +27,12 @@ export {
 } from "./domain/errors";
 
 export {
+  stripModalityTags,
+  humanizeTtsMarkers,
+  sanitizeAssistantReply,
+} from "./domain/sanitize-reply";
+
+export {
   createConversationRepository,
   createMessageRepository,
   createChatCharacterProvider,

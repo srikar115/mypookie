@@ -1,6 +1,7 @@
 "use client";
 
 import type { MessageDto } from "../../application/dto/message.dto";
+import { sanitizeAssistantReply } from "../../domain/sanitize-reply";
 import type { ChatMessage } from "../components/MessageBubble";
 
 /**
@@ -45,11 +46,18 @@ export function dtoToChatMessage(m: MessageDto): ChatMessage {
     }
   }
 
+  // Assistant rows may pre-date the server-side sanitizer (or carry
+  // voice TTS markers that haven't been humanized yet). Scrub on
+  // hydrate so legacy bubbles match the current text/voice style —
+  // purple *action beats*, never raw `[voice call]` / `[Faint laugh]`.
+  const text =
+    role === "assistant" ? sanitizeAssistantReply(m.content) : m.content;
+
   return {
     id: m.id,
     role,
     source,
-    text: m.content,
+    text,
     at: new Date(m.createdAt),
     errorMessage: m.errorMessage,
   };

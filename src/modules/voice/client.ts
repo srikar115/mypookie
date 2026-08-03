@@ -7,6 +7,6 @@ export {
   VoiceCallButton,
   type VoiceCallHandle,
 } from "./presentation/components/VoiceCallButton";
-export { CallOverlay } from "./presentation/components/CallOverlay";
+export { CallBar, CallBarContainer } from "./presentation/components/CallBar";
 export { CallStatePill } from "./presentation/components/CallStatePill";
 export { useVoiceCall, type CallState } from "./presentation/hooks/useVoiceCall";

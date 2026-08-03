@@ -35,6 +35,17 @@ export interface VoiceOptionDto {
   readonly displayName: string;
   readonly tone: string;
   readonly sampleUrl: string | null;
+  /**
+   * Gender presentation of the voice (Cartesia vocabulary: "feminine" |
+   * "masculine" | "gender_neutral"). Null on legacy rows — treated as
+   * "show to everyone" by the wizard's gender filter.
+   */
+  readonly gender: string | null;
+  /**
+   * "young" | "mature" — classified from the voice description at
+   * import time. Null = unknown, matches any character age.
+   */
+  readonly ageGroup: string | null;
 }
 
 export interface CharacterLookupsDto {

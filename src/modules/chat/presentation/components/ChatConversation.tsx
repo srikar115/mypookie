@@ -10,7 +10,12 @@ import {
 } from "lucide-react";
 import { cn } from "@/shared/presentation/utils";
 import type { CharacterSummaryDto } from "@/modules/characters";
-import { VoiceCallButton, useVoiceCall } from "@/modules/voice/client";
+import {
+  CallBarContainer,
+  VoiceCallButton,
+  useVoiceCall,
+  type CallState,
+} from "@/modules/voice/client";
 import { MessageBubble, type ChatMessage } from "./MessageBubble";
 import { CallEndedMarker } from "./CallEndedMarker";
 import { TypingIndicator } from "./TypingIndicator";
@@ -74,17 +79,43 @@ export function ChatConversation({
   useEffect(() => {
     const prev = prevCallStateRef.current;
     prevCallStateRef.current = call.state;
-    // Refresh once, on the falling edge into `ended`. `error` we skip —
-    // if the call never connected, nothing new to render. Small delay
-    // lets the LiveKit agent's final /voice-agent/turn POST land before
-    // we re-fetch (the agent posts fire-and-forget so this is a race
-    // we bias by ~700ms rather than solving with polling).
+    // Final refresh on the falling edge into `ended` — catches the
+    // last turn(s) plus the CallEndedMarker written by
+    // `EndCallUseCase`. `error` skipped — nothing to render.
+    // Small delay lets the LiveKit agent's final /voice-agent/turn
+    // POST land before we re-fetch (the agent posts fire-and-forget).
     if (prev !== "ended" && call.state === "ended") {
       const t = setTimeout(() => {
         void refresh();
       }, 700);
       return () => clearTimeout(t);
     }
+  }, [call.state, refresh]);
+
+  // ─── Live transcript during a call ────────────────────────────
+  // Poll the messages endpoint while a call is active so each voice
+  // turn (user STT + character reply) appears in the chat feed in
+  // near-real-time, matching Candy AI's dual-modality UX. Two seconds
+  // is a good compromise: fast enough to feel live, cheap enough to
+  // run for the whole call. The RecordVoiceTurnUseCase persists both
+  // messages atomically, so a poll either sees both or neither — no
+  // half-written rows.
+  //
+  // Polls only when a turn is actually possible (not while
+  // ringing/connecting and not after end/error).
+  const CALL_POLL_MS = 2000;
+  useEffect(() => {
+    const activeStates: CallState[] = [
+      "listening",
+      "user_speaking",
+      "character_thinking",
+      "character_speaking",
+    ];
+    if (!activeStates.includes(call.state)) return;
+    const interval = setInterval(() => {
+      void refresh();
+    }, CALL_POLL_MS);
+    return () => clearInterval(interval);
   }, [call.state, refresh]);
   const handleSpeakAgain = () => {
     if (!conversationId) return;
@@ -213,6 +244,21 @@ export function ChatConversation({
         conversationId={conversationId}
         call={call}
         speakAgainSignal={speakAgainSignal}
+      />
+
+      {/* Compact in-flow call bar. Slides in beneath the header while a
+          call is active (idle → connecting → … → ended → auto-hide).
+          Rendering here keeps the transcript visible and scrollable
+          during the call — no full-screen overlay, no scroll lock. */}
+      <CallBarContainer
+        characterName={character.name}
+        characterImageUrl={character.imageUrl}
+        state={call.state}
+        error={call.error}
+        durationSec={call.durationSec}
+        muted={call.muted}
+        onHangUp={() => void call.hangUp()}
+        onToggleMute={call.toggleMute}
       />
 
       <div
@@ -389,8 +435,6 @@ function ConversationHeader({
       <div className="flex items-center gap-1 text-[#c4c2d4]">
         <VoiceCallButton
           conversationId={conversationId}
-          characterName={character.name}
-          characterImageUrl={character.imageUrl}
           enabled={VOICE_CALLS_ENABLED}
           call={call}
           openSignal={speakAgainSignal}

@@ -428,6 +428,8 @@ export class PrismaCharacterRepository implements CharacterRepository {
         displayName: v.displayName,
         tone: v.tone,
         sampleUrl: v.sampleR2Key ? buildPublicUrl(v.sampleR2Key) : null,
+        gender: v.gender,
+        ageGroup: v.ageGroup,
       })),
     };
   }

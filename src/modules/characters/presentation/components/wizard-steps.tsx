@@ -11,8 +11,8 @@
  * shell owns those.
  */
 
-import { useState } from "react";
-import { Plus, Shuffle, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Pause, Play, Plus, Shuffle, X } from "lucide-react";
 import { cn } from "@/shared/presentation/utils";
 import { PhotoTile } from "./PhotoTile";
 import type {
@@ -636,14 +636,9 @@ export function StepDetails({ draft, patch, lookups, onSurpriseName }: StepDetai
         />
       </Field>
 
-      <Field label="Voice">
-        <SlugPicker
-          options={lookups.voices.map((v: VoiceOptionDto) => ({
-            slug: v.slug,
-            displayName: v.displayName,
-            description: v.tone,
-            icon: null,
-          }))}
+      <Field label="Voice" hint="Tap ▶ to preview">
+        <VoicePicker
+          voices={filterVoices(lookups.voices, draft.gender, draft.ageBucket)}
           value={draft.voiceSlug}
           onSelect={(slug) => patch({ voiceSlug: slug })}
         />
@@ -671,6 +666,176 @@ export function StepDetails({ draft, patch, lookups, onSurpriseName }: StepDetai
 }
 
 // ─── Details step helpers ────────────────────────────────────────────────
+
+/**
+ * Gender + age filter for voice options.
+ *
+ * Gender: a female character lists feminine voices, a male character
+ * masculine ones. Neutral and un-tagged (legacy) voices show for
+ * everyone; NONBINARY characters see the full catalogue.
+ *
+ * Age: voices classified "young" are hidden for 41+ characters and
+ * "mature" voices are hidden for characters under 31. Voices without
+ * an age classification (null) match every age — so the filter only
+ * ever removes clear mismatches, never starves the list.
+ */
+function filterVoices(
+  voices: readonly VoiceOptionDto[],
+  characterGender: Gender | null,
+  ageBucket: AgeBucket | null,
+): readonly VoiceOptionDto[] {
+  const lean =
+    characterGender === "MALE" || characterGender === "TRANS_MAN"
+      ? "masculine"
+      : characterGender === "FEMALE" || characterGender === "TRANS_WOMAN"
+        ? "feminine"
+        : null;
+  const excludedAge =
+    ageBucket === "41+"
+      ? "young"
+      : ageBucket === "18-24" || ageBucket === "25-30"
+        ? "mature"
+        : null; // 31-40 and unset: no age exclusion
+
+  return voices.filter((v) => {
+    if (
+      lean !== null &&
+      v.gender !== null &&
+      v.gender !== lean &&
+      v.gender !== "gender_neutral"
+    ) {
+      return false;
+    }
+    if (excludedAge !== null && v.ageGroup === excludedAge) {
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Voice tile grid with inline audio preview. One shared HTMLAudioElement
+ * lives in a ref — starting a preview stops whatever was playing, so
+ * the user can flip through voices quickly without overlapping audio.
+ * The play button is nested inside the selectable tile; clicks on it
+ * stopPropagation so previewing never accidentally selects.
+ */
+function VoicePicker({
+  voices,
+  value,
+  onSelect,
+}: {
+  voices: readonly VoiceOptionDto[];
+  value: string | null;
+  onSelect: (slug: string) => void;
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playingSlug, setPlayingSlug] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  // Stop playback when the step unmounts (user navigates away).
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+      audioRef.current = null;
+    };
+  }, []);
+
+  const togglePreview = (v: VoiceOptionDto) => {
+    if (!v.sampleUrl) return;
+    if (playingSlug === v.slug) {
+      audioRef.current?.pause();
+      audioRef.current = null;
+      setPlayingSlug(null);
+      return;
+    }
+    audioRef.current?.pause();
+    const audio = new Audio(v.sampleUrl);
+    audio.onended = () => setPlayingSlug(null);
+    audio.onerror = () => setPlayingSlug(null);
+    audioRef.current = audio;
+    setPlayingSlug(v.slug);
+    void audio.play().catch(() => setPlayingSlug(null));
+  };
+
+  const initial = 6;
+  const visible = expanded ? voices : voices.slice(0, initial);
+  const hidden = voices.length - initial;
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        {visible.map((v) => {
+          const active = value === v.slug;
+          const playing = playingSlug === v.slug;
+          return (
+            <button
+              key={v.slug}
+              type="button"
+              onClick={() => onSelect(v.slug)}
+              className={cn(
+                "text-left rounded-xl px-3 py-2.5 transition-all cursor-pointer",
+                active
+                  ? "bg-pink-500/10 ring-2 ring-pink-500 text-white"
+                  : "bg-[#141420] ring-1 ring-[#26263a] hover:ring-pink-400/60 hover:bg-[#181828]",
+              )}
+            >
+              <div className="flex items-center gap-2">
+                {v.sampleUrl ? (
+                  <span
+                    role="button"
+                    tabIndex={0}
+                    aria-label={playing ? "Stop preview" : "Play preview"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      togglePreview(v);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        togglePreview(v);
+                      }
+                    }}
+                    className={cn(
+                      "flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors",
+                      playing
+                        ? "bg-pink-500 text-white"
+                        : "bg-[#1e1e2e] text-[#c4c2d4] hover:bg-pink-500/30 hover:text-white",
+                    )}
+                  >
+                    {playing ? (
+                      <Pause className="h-3.5 w-3.5" />
+                    ) : (
+                      <Play className="h-3.5 w-3.5 translate-x-px" />
+                    )}
+                  </span>
+                ) : null}
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-white truncate">
+                    {v.displayName}
+                  </div>
+                  <div className="text-xs text-[#8a8a99] truncate">
+                    {v.tone}
+                  </div>
+                </div>
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      {hidden > 0 && !expanded ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="mt-2 w-full rounded-xl border border-dashed border-[#26263a] py-2 text-xs text-[#8a8a99] hover:border-pink-400/60 hover:text-white transition-colors cursor-pointer"
+        >
+          Show {hidden} more
+        </button>
+      ) : null}
+    </div>
+  );
+}
 
 function SlugPicker({
   options,

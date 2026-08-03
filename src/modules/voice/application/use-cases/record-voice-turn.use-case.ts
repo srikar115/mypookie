@@ -10,6 +10,10 @@ import {
   CallSessionNotFoundError,
 } from "../../domain/errors";
 import { stripStageDirections } from "../../domain/strip-stage-directions";
+import {
+  humanizeTtsMarkers,
+  stripModalityTags,
+} from "@/modules/chat";
 
 /**
  * RecordVoiceTurn — persists a completed voice turn pair and schedules
@@ -20,7 +24,9 @@ import { stripStageDirections } from "../../domain/strip-stage-directions";
  *
  * Writes two `messages` rows with `source=VOICE`, atomically:
  *   - USER    → the STT transcript
- *   - ASSISTANT → the LLM output (with any [laugh]/[sigh] markers stripped)
+ *   - ASSISTANT → scrubbed LLM output (stage directions out, modality
+ *     tags out, Cartesia `[laugh]` markers converted to `*laughs*`
+ *     so the chat transcript matches text-mode expression style)
  *
  * Then bumps the CallSession.turnCount and fires the shared memory
  * `IngestTurnUseCase` on `after()` so voice conversations feed the same
@@ -49,8 +55,6 @@ export interface RecordedVoiceTurn {
   };
 }
 
-const STRIP_MARKERS_RE = /\[(?:laugh|sigh|whisper|breath|chuckle|gasp)\]/gi;
-
 export class RecordVoiceTurnUseCase {
   constructor(
     private readonly db: PrismaClient,
@@ -74,29 +78,26 @@ export class RecordVoiceTurnUseCase {
     const now = this.clock.now();
     const userId = this.ids.next();
     const assistantId = this.ids.next();
-    // Two-stage clean:
-    //   1. `stripStageDirections` — remove third-person narration and
-    //      parentheticals the model slipped past the "voice output
-    //      protocol" system-prompt block. Cydonia especially likes to
-    //      open a reply with "*she smiles*" or "she gently reaches
-    //      out…" despite explicit instructions not to; scrubbing here
-    //      keeps the chat log immersive even when audio slipped.
-    //   2. `STRIP_MARKERS_RE` — Cartesia paralinguistic markers
-    //      `[laugh]`, `[sigh]` etc. are needed by the TTS but read as
-    //      literal bracketed text in a chat bubble. Strip on persist.
+    // Three-stage clean for the chat transcript. Audio already played
+    // the raw LLM text (with Cartesia markers); the persisted row must
+    // match text-chat expression style so voice and typed bubbles look
+    // like the same character:
+    //   1. `stripStageDirections` — kill third-person narration /
+    //      parentheticals that slipped past the voice protocol.
+    //   2. `stripModalityTags` — models occasionally echo the
+    //      composer's `[voice call]` / `[text chat]` history tags.
+    //   3. `humanizeTtsMarkers` — `[laugh]` / `[Faint laugh]` →
+    //      `*laughs*` / `*faint laugh*` so they render in the same
+    //      purple italic as typed action beats.
     const rawAssistant = input.turn.assistantContent;
-    const afterStageStrip = stripStageDirections(rawAssistant);
-    const cleanedAssistant = afterStageStrip.replace(STRIP_MARKERS_RE, "").trim();
-    if (afterStageStrip !== rawAssistant.trim()) {
-      // Emit only in dev — surfaces prompt regressions early. Silence
-      // in prod if the log volume becomes noisy.
-      console.info(
-        "[voice.record-turn] scrubbed stage directions",
-        {
-          before: rawAssistant.slice(0, 200),
-          after: cleanedAssistant.slice(0, 200),
-        },
-      );
+    const cleanedAssistant = humanizeTtsMarkers(
+      stripModalityTags(stripStageDirections(rawAssistant)),
+    );
+    if (cleanedAssistant !== rawAssistant.trim()) {
+      console.info("[voice.record-turn] scrubbed assistant content", {
+        before: rawAssistant.slice(0, 200),
+        after: cleanedAssistant.slice(0, 200),
+      });
     }
 
     // Both rows in one transaction so the memory ingest sees a consistent

@@ -73,7 +73,19 @@ export function CharacterWizard({
   const [isSubmitting, startSubmit] = useTransition();
 
   const patch = (p: Partial<WizardDraft>) =>
-    setDraft((prev) => ({ ...prev, ...p }));
+    setDraft((prev) => {
+      // Voice options are filtered by gender AND age bucket, so
+      // changing either invalidates any voice picked under the previous
+      // filter. Clear it and let the Details step's required-field
+      // validation force a re-pick.
+      const genderChanged = p.gender !== undefined && p.gender !== prev.gender;
+      const ageChanged =
+        p.ageBucket !== undefined && p.ageBucket !== prev.ageBucket;
+      if (genderChanged || ageChanged) {
+        return { ...prev, ...p, voiceSlug: null };
+      }
+      return { ...prev, ...p };
+    });
 
   // Preview index rebuilt only when the (baseStyle, gender) filter
   // changes — most tile renders don't allocate anything new.

@@ -2,6 +2,7 @@
 
 import { Fragment, useMemo, type ReactNode } from "react";
 import emojiRegex from "emoji-regex";
+import { sanitizeAssistantReply } from "../../domain/sanitize-reply";
 
 /**
  * Twemoji rendering for chat text.
@@ -196,7 +197,11 @@ export function splitMessageIntoSegments(text: string): MessageSegment[] {
  * (unlikely case, but graceful).
  */
 export function MessageText({ text }: { text: string }) {
-  const segments = useMemo(() => splitMessageIntoSegments(text), [text]);
+  // Defense-in-depth: scrub modality tags / TTS brackets that slipped
+  // past persist or live in legacy rows, so purple *beats* stay the
+  // single expression language in the UI.
+  const cleaned = useMemo(() => sanitizeAssistantReply(text), [text]);
+  const segments = useMemo(() => splitMessageIntoSegments(cleaned), [cleaned]);
 
   return (
     <>

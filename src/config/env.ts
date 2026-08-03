@@ -157,20 +157,21 @@ const envSchema = z.object({
   // their catalogue into "Stable" voices (best for support-desk
   // agents) and "Emotive" voices (best for AI characters, companion
   // apps, and game NPCs). Companion voices belong in the Emotive tier
-  // — Stable voices sound flat and IVR-ish. Defaults below come
-  // straight from Cartesia's own character-tier recommendation:
+  // — Stable voices sound flat and IVR-ish.
   //
-  //   Female: Tessa — 6ccbfb76-1fc6-48f7-b71d-91ac6298247b
-  //     Warm, expressive, laughter-capable. Alternatives: Ariana, Lucy.
+  //   Female: Ariana — Kind Friend — ec1e269e-9ca0-402f-8a18-58e0e022355a
+  //     "Friendly and approachable female voice with a warm, welcoming
+  //      tone that builds instant connection." Product default since
+  //      2026-08-03 (see scripts/seed-default-voice-ariana.mjs).
+  //     Alternatives: Tessa (6ccbfb76-…), Lucy.
   //   Male:   Kyle  — c961b81c-a935-4c17-bfb3-ba2239de8c2f
   //     Grounded, playful. Alternatives: Cory, Nolan.
   //
-  // Long term these should be seeded into `voice_presets` per character
-  // so different characters can have different voices even at the same
-  // gender. Env-level defaults are the fallback picker.
+  // These are FALLBACK picks only — per-character voices live in
+  // `voice_presets` and win when present.
   CARTESIA_VOICE_ID_FEMALE: z
     .string()
-    .default("6ccbfb76-1fc6-48f7-b71d-91ac6298247b"),
+    .default("ec1e269e-9ca0-402f-8a18-58e0e022355a"),
   CARTESIA_VOICE_ID_MALE: z
     .string()
     .default("c961b81c-a935-4c17-bfb3-ba2239de8c2f"),

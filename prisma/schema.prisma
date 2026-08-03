@@ -202,6 +202,23 @@ model VoicePreset {
   providerVoiceId String
   sampleR2Key     String?
   language        String        @default("en")
+  // Gender presentation of the VOICE (Cartesia vocabulary:
+  // "feminine" | "masculine" | "gender_neutral"). Drives the wizard's
+  // gender-filtered voice picker — female characters list feminine
+  // voices, male characters list masculine ones. Nullable so legacy
+  // rows keep working until backfilled (null = shown to everyone).
+  gender          String?
+  // "young" | "mature" — heuristically classified from the Cartesia
+  // description ("young adult female…", "Mature female…"). Null =
+  // unknown, shown for every character age. Matched against the
+  // wizard's ageBucket so a 45-year-old character doesn't offer
+  // college-kid voices.
+  ageGroup        String?
+  // "conversational" | "support" | "narration" | "advertising" —
+  // description-derived. Conversational voices rank first in the
+  // picker; support-desk voices sink to the bottom (they're the
+  // "IVR accent" the companion experience is trying to avoid).
+  category        String?
   sortOrder       Int           @default(0)
   isActive        Boolean       @default(true)
 

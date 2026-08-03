@@ -7,6 +7,7 @@ import {
   ConversationNotFoundError,
   createAppendAssistantMessageUseCase,
   createBuildOpenerContextUseCase,
+  sanitizeAssistantReply,
 } from "@/modules/chat";
 import { createAssembleContextUseCase } from "@/modules/memory";
 import { OpenRouterChatLlm } from "@/shared/infrastructure/llm/openrouter-chat-llm";
@@ -126,7 +127,33 @@ export async function POST(
     );
   }
 
-  const finalContent = content.trim();
+  // Same scrub as the main stream route — the model occasionally copies
+  // the composer's `[voice call]`/`[text chat]` history annotations into
+  // its own output.
+  const finalContent = sanitizeAssistantReply(content.trim());
+
+  // Dedupe backstop: revisit openers occasionally regenerate the
+  // previous assistant message verbatim (same history in → same
+  // tokens out, even at temperature). The composer now forbids it in
+  // the prompt, but prompt rules are probabilistic — this check is
+  // the deterministic net. If the new opener is essentially the same
+  // as the character's last message, drop it silently: the client
+  // treats `skipped` as "no opener this time", which is strictly
+  // better UX than a visible duplicate.
+  const lastAssistant = [...built.messages]
+    .reverse()
+    .find((m) => m.role === "assistant");
+  if (lastAssistant && isNearDuplicate(finalContent, lastAssistant.content)) {
+    console.info(
+      `[chat.opener] suppressed near-duplicate opener (conversation=${conversationId})`,
+    );
+    await appendAssistant.fail({
+      messageId: placeholder.id,
+      errorMessage: "duplicate_opener_suppressed",
+    });
+    return Response.json({ ok: true, skipped: true });
+  }
+
   if (finalContent.length === 0) {
     // Empty completion. Most common cause: the model's chat template
     // requires a trailing user turn (see `composeOpener` in the
@@ -166,6 +193,29 @@ export async function POST(
       createdAt: finalized.createdAt,
     },
   });
+}
+
+/**
+ * Near-duplicate detection for opener suppression. Normalizes away
+ * everything that isn't semantic content (asterisk beats, emoji-ish
+ * symbols, punctuation, case, whitespace) then checks exact equality
+ * or full containment. Deliberately conservative — a false positive
+ * here silently swallows a legitimate opener, so we only trigger on
+ * unmistakable repeats.
+ */
+function isNearDuplicate(a: string, b: string): boolean {
+  const norm = (s: string) =>
+    s
+      .replace(/\*[^*\n]{1,200}\*/g, "")
+      .replace(/^\[voice call\]\s*/i, "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const na = norm(a);
+  const nb = norm(b);
+  if (na.length < 20 || nb.length < 20) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
 }
 
 function jsonError(

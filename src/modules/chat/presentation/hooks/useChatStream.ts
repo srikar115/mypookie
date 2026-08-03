@@ -5,6 +5,7 @@ import type { ChatMessage } from "../components/MessageBubble";
 import { parseChatErrorCode } from "../lib/chat-error";
 import { dtoToChatMessage } from "../lib/dto-mapper";
 import { listMessagesAction } from "../actions/list-messages.action";
+import { sanitizeAssistantReply } from "../../domain/sanitize-reply";
 
 /**
  * useChatStream — owns the message list for a single conversation and the
@@ -317,18 +318,24 @@ export function useChatStream({
           }
         }
 
+        // Match the server-side scrub in stream/route.ts. The SSE
+        // deltas arrive raw (the model may echo `[voice call]` tags);
+        // sanitize before revealing the bubble so the UI never shows
+        // system metadata or TTS bracket markers.
+        const cleaned = sanitizeAssistantReply(accumulated);
+
         if (finalMessageId) {
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantTempId
-                ? { ...m, id: finalMessageId!, streaming: false, text: accumulated }
+                ? { ...m, id: finalMessageId!, streaming: false, text: cleaned }
                 : m,
             ),
           );
         } else {
           // Stream closed without a `done` event — treat as soft error but
           // keep the accumulated text.
-          patchAssistant({ streaming: false, text: accumulated });
+          patchAssistant({ streaming: false, text: cleaned });
         }
       } catch (e) {
         // Fetch itself blew up (offline, DNS, aborted). Never surface
@@ -432,11 +439,21 @@ export function useChatStream({
       const body = (await res.json().catch(() => null)) as
         | {
             ok?: boolean;
+            skipped?: boolean;
             message?: { id: string; content: string; createdAt: string };
             error?: string;
             code?: string;
           }
         | null;
+
+      // Server chose not to send an opener (e.g. the generation came
+      // out as a near-duplicate of the character's previous message
+      // and was suppressed). Not an error — strip the placeholder
+      // and stay quiet.
+      if (res.ok && body?.ok && body.skipped) {
+        setMessages((prev) => prev.filter((m) => m.id !== assistantTempId));
+        return false;
+      }
 
       if (!res.ok || !body?.ok || !body.message) {
         // Opener failed — quietly strip the placeholder rather than

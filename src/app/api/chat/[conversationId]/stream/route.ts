@@ -9,6 +9,7 @@ import {
   createAppendAssistantMessageUseCase,
   createAppendUserMessageUseCase,
   createBuildChatContextUseCase,
+  sanitizeAssistantReply,
 } from "@/modules/chat";
 import {
   createAssembleContextUseCase,
@@ -206,6 +207,14 @@ export async function POST(
           streamState.content += delta;
           send({ type: "text_delta", delta });
         }
+
+        // Scrub before persist + ingest: models occasionally copy the
+        // composer's `[voice call]`/`[text chat]` history annotations
+        // into their own output, and bracketed TTS-style markers have
+        // no place in a text reply. The client applies the same
+        // sanitizer to its buffered copy, so what the user sees now
+        // matches what reloads from the DB later.
+        streamState.content = sanitizeAssistantReply(streamState.content);
 
         await appendAssistant.finalize({
           messageId: placeholder.id,
