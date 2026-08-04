@@ -2,8 +2,11 @@ import "server-only";
 import type { ServerContext } from "@/composition/server-context";
 import type { ChatLlm } from "@/shared/application/llm/chat-llm";
 import type { EmbeddingLlm } from "@/shared/application/llm/embedding-llm";
+import type { MemoryContextProvider } from "@/modules/chat";
 import { OpenRouterChatLlm } from "@/shared/infrastructure/llm/openrouter-chat-llm";
 import { OpenAIEmbeddingLlm } from "@/shared/infrastructure/llm/openai-embedding-llm";
+import { CachedEmbeddingLlm } from "@/shared/infrastructure/llm/cached-embedding-llm";
+import redis from "@/shared/infrastructure/cache/redis";
 import { env } from "@/config/env";
 import { PrismaMemoryStore } from "../infrastructure/prisma-memory.store";
 import { PgHybridSearcher } from "../infrastructure/pg-hybrid.searcher";
@@ -12,6 +15,7 @@ import { PromptedFactExtractor } from "../infrastructure/prompted-fact-extractor
 import { PromptedSessionSummarizer } from "../infrastructure/prompted-session-summarizer";
 import { DeterministicRelationshipUpdater } from "../infrastructure/deterministic-relationship.updater";
 import { ResolvedEmbedder } from "../infrastructure/resolved-embedder";
+import { CachedMemoryContextProvider } from "../infrastructure/cached-memory-context.provider";
 import type { Embedder } from "../application/ports/embedder";
 import { AssembleContextUseCase } from "../application/use-cases/assemble-context.use-case";
 import { IngestTurnUseCase } from "../application/use-cases/ingest-turn.use-case";
@@ -35,13 +39,21 @@ function getChatLlm(): ChatLlm {
 // the OpenAI key. The searcher + ingest use case both handle null
 // gracefully so the chat continues working with the 3-signal formula
 // (lexical + entity + recency) in that mode.
+//
+// The singleton is wrapped in `CachedEmbeddingLlm` so every embedding
+// call (read path from `PgHybridSearcher.search`, write path from
+// `IngestTurnUseCase.embedFacts`) goes through a shared Redis result
+// cache. Cache key is content-addressed by (modelId, dimensions,
+// sha256(text)); TTL is 7 days because embeddings are stable for a
+// given model version. See `CachedEmbeddingLlm` docstring for details.
 let sharedEmbeddingLlm: EmbeddingLlm | null | undefined = undefined;
 function getEmbeddingLlm(): EmbeddingLlm | null {
   if (sharedEmbeddingLlm === undefined) {
-    sharedEmbeddingLlm =
+    const base =
       env.SEMANTIC_MEMORY_ENABLED && !!env.OPENAI_API_KEY
         ? new OpenAIEmbeddingLlm()
         : null;
+    sharedEmbeddingLlm = base ? new CachedEmbeddingLlm(base, redis) : null;
   }
   return sharedEmbeddingLlm;
 }
@@ -51,15 +63,32 @@ function createEmbedder(ctx: ServerContext): Embedder | null {
   return llm ? new ResolvedEmbedder(llm, ctx.models) : null;
 }
 
+/**
+ * Builds the memory context provider used by chat + voice + opener.
+ *
+ * The concrete assembly (`AssembleContextUseCase`) is wrapped in
+ * `CachedMemoryContextProvider` so the fully-composed memory block is
+ * memoized in Redis for 60s per unique
+ * (userId, characterId, conversationId, userMessage, displayName)
+ * tuple. Between voice turns this eliminates the 200–600ms memory-
+ * assembly cost when the same utterance recurs (openers, retries,
+ * short repeats like "you there?"). Failure is fail-open — a Redis
+ * outage transparently degrades to direct assembly.
+ *
+ * Return type narrowed to `MemoryContextProvider` because callers only
+ * use the interface method (`getMemoryBlock`) — the decorator hides
+ * the concrete class.
+ */
 export function createAssembleContextUseCase(
   ctx: ServerContext,
-): AssembleContextUseCase {
+): MemoryContextProvider {
   const embedder = createEmbedder(ctx);
-  return new AssembleContextUseCase(
+  const inner = new AssembleContextUseCase(
     new PrismaMemoryStore(ctx.db),
     new PgHybridSearcher(ctx.db, embedder),
     new PrismaRelationshipStore(ctx.db),
   );
+  return new CachedMemoryContextProvider(inner, ctx.redis);
 }
 
 export function createIngestTurnUseCase(ctx: ServerContext): IngestTurnUseCase {
