@@ -27,6 +27,27 @@
  * @returns scrubbed content, or the original if nothing looked like a
  *   stage direction.
  */
+// Prose stage-direction prefix at sentence start, no brackets, no
+// asterisks — just words: "gentle laugh Hey Bhadra" / "soft sigh Yeah".
+// The agent's TTS text transform scrubs these before Cartesia speaks
+// them; the same scrub must run here so the persisted chat transcript
+// doesn't show what the user never heard.
+const PROSE_STAGE_LEAD_RE =
+  /(^|[.!?\n]\s+)((?:gentle|soft|light|small|quiet|little|nervous|shy|warm|playful|faint)\s+)?(laugh(?:s|ter|ing)?|chuckles?|giggles?|sighs?|smiles?|nods?|blushes?|winks?|grins?)\b[,.\s]+(?=[A-Za-z])/gi;
+
+// Connection-issue apology sentences ("Seems we had a connection issue
+// there.") — these get read aloud on calls as a support-agent apology
+// for a dropped call that never dropped. Dropped from persisted chat
+// too — the user never actually heard a dropped call.
+const FILLER_PHRASE_RE =
+  /\b(?:connection|communication|comms?|audio|signal|line)\s+(?:issue|hiccup|problem|glitch|drop|blip|mishap|thing)\b/i;
+
+function isFillerSentence(sentence: string): boolean {
+  return (
+    FILLER_PHRASE_RE.test(sentence) && sentence.trim().length <= 130
+  );
+}
+
 export function stripStageDirections(text: string): string {
   if (!text || text.length === 0) return text;
 
@@ -39,7 +60,12 @@ export function stripStageDirections(text: string): string {
   //    parenthetical asides in dialogue survive.
   out = out.replace(/\([^()\n]{1,80}\)/g, "");
 
-  // 3. Walk from the front and strip contiguous narration sentences.
+  // 3. Strip prose stage directions ("gentle laugh Hey Bhadra") at
+  //    sentence start, anywhere in the text. Keep the leading
+  //    boundary character so sentence spacing survives.
+  out = out.replace(PROSE_STAGE_LEAD_RE, (_m, boundary) => boundary ?? "");
+
+  // 4. Walk from the front and strip contiguous narration sentences.
   //    We stop as soon as we hit the first sentence that reads like
   //    real dialogue. Front-only, because slip patterns almost always
   //    start with narration and then transition into speech.
@@ -48,17 +74,19 @@ export function stripStageDirections(text: string): string {
   for (let i = 0; i < maxIterations; i++) {
     const m = out.match(sentenceHead);
     if (!m) break;
-    if (!looksLikeNarrationSentence(m[1])) break;
+    if (!looksLikeNarrationSentence(m[1]) && !isFillerSentence(m[1])) break;
     out = out.slice(m[0].length);
   }
 
-  // 4. Also strip a narration sentence RIGHT AFTER a paragraph break —
-  //    Cydonia sometimes intersperses "she leans back." between
-  //    dialogue lines. Only ONE pass; conservative.
+  // 5. Also strip a narration OR filler sentence RIGHT AFTER a
+  //    paragraph break — Cydonia intersperses these between dialogue.
+  //    Only ONE pass; conservative.
   out = out.replace(
     /(\n|\.\s+|!\s+|\?\s+)([^.!?\n]{5,200}?[.!?])/g,
     (match, sep, sentence) =>
-      looksLikeNarrationSentence(sentence) ? sep : match,
+      looksLikeNarrationSentence(sentence) || isFillerSentence(sentence)
+        ? sep
+        : match,
   );
 
   return out.replace(/\s{2,}/g, " ").trim();

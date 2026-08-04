@@ -163,6 +163,7 @@ export function useVoiceCall(): UseVoiceCallResult {
   const [session, setSession] = useState<CallSessionDto | null>(null);
 
   const tickTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ringTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const detachAllAudio = useCallback(() => {
     for (const [, el] of audioElsRef.current) {
@@ -185,6 +186,10 @@ export function useVoiceCall(): UseVoiceCallResult {
     if (tickTimerRef.current) {
       clearInterval(tickTimerRef.current);
       tickTimerRef.current = null;
+    }
+    if (ringTimeoutRef.current) {
+      clearTimeout(ringTimeoutRef.current);
+      ringTimeoutRef.current = null;
     }
     if (ringtoneRef.current) {
       ringtoneRef.current.stop();
@@ -325,6 +330,10 @@ export function useVoiceCall(): UseVoiceCallResult {
           ringtoneRef.current.stop();
           ringtoneRef.current = null;
         }
+        if (ringTimeoutRef.current) {
+          clearTimeout(ringTimeoutRef.current);
+          ringTimeoutRef.current = null;
+        }
         if (durationTimerRef.current === null) {
           startedAtRef.current = Date.now();
           setDurationSec(0);
@@ -402,6 +411,33 @@ export function useVoiceCall(): UseVoiceCallResult {
       setState("error");
       return;
     }
+
+    // 4b) No-answer timeout. Agent dispatch happens when we join the
+    //     room; if it's down or overloaded, no audio track ever arrives
+    //     and the UI would ring forever. Give it 30s, then fail the
+    //     call cleanly (and finalize the session server-side so credits
+    //     stop ticking and the session row isn't left dangling).
+    const sessionIdForTimeout = payload.session.id;
+    ringTimeoutRef.current = setTimeout(() => {
+      ringTimeoutRef.current = null;
+      // Picked up already? (duration timer only starts on pickup)
+      if (durationTimerRef.current !== null) return;
+      cleanup();
+      setError(
+        "No answer — the character couldn't be reached. Please try again in a moment.",
+      );
+      setState("error");
+      void fetch(`/api/chat/${conversationId}/call/end`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          callSessionId: sessionIdForTimeout,
+          dropReason: "agent_no_answer",
+        }),
+      }).catch(() => {
+        /* best-effort — webhook fallback will finalize */
+      });
+    }, 30_000);
 
     // 5) Credit ticker. Duration timer is started only when the
     //    character picks up (see TrackSubscribed handler above), so the

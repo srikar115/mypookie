@@ -1,6 +1,7 @@
 import "server-only";
 import {
   AccessToken,
+  AgentDispatchClient,
   RoomServiceClient,
   WebhookReceiver,
 } from "livekit-server-sdk";
@@ -24,15 +25,33 @@ import { VoiceTransportError } from "../domain/errors";
 export class LivekitTransportAdapter implements VoiceTransportPort {
   private readonly roomService: RoomServiceClient;
   private readonly webhookReceiver: WebhookReceiver;
+  private readonly dispatchClient: AgentDispatchClient;
 
   constructor(
     private readonly url: string,
     private readonly apiKey: string,
     private readonly apiSecret: string,
+    /**
+     * When set, explicit-dispatch is enabled: after a token is minted,
+     * we call `AgentDispatchClient.createDispatch(roomName, agentName)`
+     * so LiveKit routes the job to a worker registered under this same
+     * name — instead of round-robining across all registered workers,
+     * which fails when a stale registration lingers after a hard crash.
+     *
+     * The matching worker lives in `E:\mypookie-livekit\src\index.ts`;
+     * its `AGENT_NAME` constant MUST equal this value or dispatches
+     * silently drop.
+     *
+     * Falsy value = fall back to LiveKit's auto-dispatch mode. Left as
+     * an escape hatch for platforms that pre-configure agents via the
+     * dashboard.
+     */
+    private readonly agentName?: string,
   ) {
     const httpUrl = url.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
     this.roomService = new RoomServiceClient(httpUrl, apiKey, apiSecret);
     this.webhookReceiver = new WebhookReceiver(apiKey, apiSecret);
+    this.dispatchClient = new AgentDispatchClient(httpUrl, apiKey, apiSecret);
   }
 
   async issueAccessToken(input: {
@@ -63,6 +82,30 @@ export class LivekitTransportAdapter implements VoiceTransportPort {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new VoiceTransportError(`Failed to mint LiveKit token: ${msg}`);
+    }
+
+    // Explicit dispatch — request a specific named agent be attached to
+    // this room. LiveKit accepts dispatches for rooms that don't exist
+    // yet: it pre-registers the request and dispatches the job the
+    // moment the browser creates the room by joining. If dispatch
+    // fails (misconfigured name, provider outage) we log and continue
+    // — the token itself is valid, so worst-case the call falls back
+    // to whatever auto-dispatch behavior the project has configured.
+    if (this.agentName) {
+      try {
+        await this.dispatchClient.createDispatch(
+          input.roomName,
+          this.agentName,
+          input.metadata
+            ? { metadata: JSON.stringify(input.metadata) }
+            : undefined,
+        );
+      } catch (e) {
+        console.warn(
+          `[livekit.dispatch] createDispatch(room=${input.roomName}, agent=${this.agentName}) failed — falling back to auto-dispatch:`,
+          e instanceof Error ? e.message : String(e),
+        );
+      }
     }
 
     return {

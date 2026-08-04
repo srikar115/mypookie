@@ -149,6 +149,16 @@ const envSchema = z.object({
   LIVEKIT_URL: optionalString,
   LIVEKIT_API_KEY: optionalString,
   LIVEKIT_API_SECRET: optionalString,
+  // Must match the `AGENT_NAME` constant in
+  // E:\mypookie-livekit\src\index.ts. When set (recommended), the web
+  // app uses explicit dispatch to route the job to a specific worker;
+  // ghost worker registrations are ignored. Empty falls back to
+  // fragile auto-dispatch — kept optional so existing dev setups keep
+  // booting until they refresh their .env.
+  LIVEKIT_AGENT_NAME: z
+    .string()
+    .default("amorify-companion")
+    .transform((v) => v.trim()),
   LIVEKIT_AGENT_URL: optionalString,
   LIVEKIT_WEBHOOK_KEY: optionalString,
   DEEPGRAM_API_KEY: optionalString,

@@ -43,6 +43,10 @@ function requireVoiceEnv(): {
   livekitUrl: string;
   livekitApiKey: string;
   livekitApiSecret: string;
+  // Explicit-dispatch agent name (from LIVEKIT_AGENT_NAME env). When
+  // undefined the adapter falls back to LiveKit's auto-dispatch — kept
+  // as an escape hatch, not the intended production path.
+  livekitAgentName: string | undefined;
   deepgramApiKey: string;
   cartesiaApiKey: string;
 } {
@@ -68,6 +72,9 @@ function requireVoiceEnv(): {
     livekitUrl: LIVEKIT_URL,
     livekitApiKey: LIVEKIT_API_KEY,
     livekitApiSecret: LIVEKIT_API_SECRET,
+    // LIVEKIT_AGENT_NAME has a default in env.ts so this is always set
+    // — but keep undefined as an escape hatch (empty string in .env).
+    livekitAgentName: env.LIVEKIT_AGENT_NAME || undefined,
     deepgramApiKey: DEEPGRAM_API_KEY,
     cartesiaApiKey: CARTESIA_API_KEY,
   };
@@ -80,11 +87,13 @@ export function createCallSessionRepository(
 }
 
 export function createVoiceTransport(_ctx: ServerContext): VoiceTransportPort {
-  const { livekitUrl, livekitApiKey, livekitApiSecret } = requireVoiceEnv();
+  const { livekitUrl, livekitApiKey, livekitApiSecret, livekitAgentName } =
+    requireVoiceEnv();
   return new LivekitTransportAdapter(
     livekitUrl,
     livekitApiKey,
     livekitApiSecret,
+    livekitAgentName,
   );
 }
 
