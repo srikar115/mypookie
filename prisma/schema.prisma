@@ -244,17 +244,17 @@ model Character {
   birthdate DateTime @db.Date
 
   // Wizard answers — appearance (screenshot 7 "Appearance" tab)
-  baseStyle BaseStyle
-  ethnicity Ethnicity
-  gender    Gender
-  ageYears  Int
-  eyeColor  EyeColor
-  hairStyle HairStyle
-  hairColor HairColor
-  bodyType  BodyType
-  bustSize  SizeTier?
-  hipSize   SizeTier?
-  clothing  String?
+  baseStyle    BaseStyle
+  ethnicity    Ethnicity
+  gender       Gender
+  ageYears     Int
+  eyeColor     EyeColor
+  hairStyle    HairStyle
+  hairColor    HairColor
+  bodyType     BodyType
+  bustSize     SizeTier?
+  hipSize      SizeTier?
+  clothing     String?
   // Wizard v2 — style-of-dress preset that drives the wardrobe pool at
   // image generation time. Optional so pre-v2 rows (if any) don't break;
   // wizard v2 always writes it.
@@ -273,12 +273,12 @@ model Character {
   dominance      Int @default(50)
 
   // Discovery / classification
-  language String   @default("en")
-  hobbies  String[] @default([])
-  tags     String[] @default([])
-  nsfwOptIn Boolean @default(false)
-  tagline  String?
-  backstory String? @db.Text
+  language  String   @default("en")
+  hobbies   String[] @default([])
+  tags      String[] @default([])
+  nsfwOptIn Boolean  @default(false)
+  tagline   String?
+  backstory String?  @db.Text
 
   // Compiled artifacts — regenerated whenever mutable answers change.
   systemPrompt     String   @db.Text
@@ -287,9 +287,9 @@ model Character {
   promptCompiledAt DateTime
 
   // Lifecycle (screenshot 6 loading → screenshot 7 preview → "Bring my AI to Life")
-  status              CharacterStatus @default(DRAFT)
-  regenerationCount   Int             @default(0)
-  committedAt         DateTime?
+  status            CharacterStatus @default(DRAFT)
+  regenerationCount Int             @default(0)
+  committedAt       DateTime?
 
   // Moderation + visibility
   visibility       CharacterVisibility       @default(PRIVATE)
@@ -299,13 +299,13 @@ model Character {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  ownerUser              User                         @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
-  personalityArchetype   PersonalityArchetype         @relation(fields: [personalityArchetypeId], references: [id])
-  relationshipArchetype  RelationshipArchetype        @relation(fields: [relationshipArchetypeId], references: [id])
-  occupation             CharacterOccupation          @relation(fields: [occupationId], references: [id])
-  voicePreset            VoicePreset                  @relation(fields: [voicePresetId], references: [id])
-  appearanceProfiles     CharacterAppearanceProfile[]
-  editHistory            CharacterEditHistory[]
+  ownerUser             User                         @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  personalityArchetype  PersonalityArchetype         @relation(fields: [personalityArchetypeId], references: [id])
+  relationshipArchetype RelationshipArchetype        @relation(fields: [relationshipArchetypeId], references: [id])
+  occupation            CharacterOccupation          @relation(fields: [occupationId], references: [id])
+  voicePreset           VoicePreset                  @relation(fields: [voicePresetId], references: [id])
+  appearanceProfiles    CharacterAppearanceProfile[]
+  editHistory           CharacterEditHistory[]
 
   // Chat + memory back-relations
   conversations          Conversation[]
@@ -347,9 +347,9 @@ model CharacterAppearanceProfile {
 }
 
 model CharacterEditHistory {
-  id           String  @id @default(uuid()) @db.Uuid
-  characterId  String  @db.Uuid
-  editorUserId String  @db.Uuid
+  id           String         @id @default(uuid()) @db.Uuid
+  characterId  String         @db.Uuid
+  editorUserId String         @db.Uuid
   tier         ConstraintTier
   fieldName    String
   oldValue     Json?
@@ -604,6 +604,11 @@ model Conversation {
 
   @@unique([userId, characterId])
   @@index([userId, lastMessageAt(sort: Desc)])
+  // Covers the FK on `characterId` — the (userId, characterId) unique index
+  // above puts characterId in the trailing position, which Postgres can't
+  // use for scans on characterId alone (leftmost-prefix rule). Added in
+  // migration 20260804120000_add_fk_covering_indexes.
+  @@index([characterId])
   @@map("conversations")
 }
 
@@ -789,6 +794,12 @@ model MemoryFact {
   character Character? @relation(fields: [characterId], references: [id], onDelete: Cascade)
   sourceMsg Message?   @relation(fields: [sourceMessageId], references: [id], onDelete: SetNull)
 
+  // FK covering indexes — see migration 20260804120000_add_fk_covering_indexes.
+  // The existing (userId, characterId) composite has characterId as the
+  // trailing column, so scans on characterId alone (cascade deletes,
+  // "everything for this character" lookups) were sequential scans.
+  @@index([characterId])
+  @@index([sourceMessageId])
   @@map("memory_facts")
 }
 
@@ -826,6 +837,8 @@ model RelationshipState {
   character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
 
   @@unique([userId, characterId])
+  // FK covering index — see migration 20260804120000_add_fk_covering_indexes.
+  @@index([characterId])
   @@map("relationship_states")
 }
 
@@ -852,6 +865,8 @@ model RelationshipMilestone {
   character Character @relation(fields: [characterId], references: [id], onDelete: Cascade)
 
   @@index([userId, characterId, occurredAt(sort: Desc)])
+  // FK covering index — see migration 20260804120000_add_fk_covering_indexes.
+  @@index([characterId])
   @@map("relationship_milestones")
 }
 
@@ -933,5 +948,7 @@ model CallSession {
   @@index([conversationId, startedAt(sort: Desc)])
   @@index([userId, startedAt(sort: Desc)])
   @@index([userId, endedAt])
+  // FK covering index — see migration 20260804120000_add_fk_covering_indexes.
+  @@index([characterId])
   @@map("call_sessions")
 }

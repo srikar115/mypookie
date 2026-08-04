@@ -67,6 +67,61 @@ Link references.
 Newest entries at the top.
 -->
 
+### 20260804120000_add_fk_covering_indexes
+
+**Date:** 2026-08-04
+**Author:** amorify agent
+**Status:** Applied
+
+#### Purpose
+Closes the eight `unindexed_foreign_keys` warnings surfaced by the Supabase performance advisor (2026-08-04). Every child-side lookup on these FK columns — cascade deletes triggered by a character or message being removed, and every `WHERE characterId = ?` filter used by memory / conversation / call-history queries — was falling back to a sequential scan on the child table.
+
+Live traffic wasn't hurting yet because the tables are still tiny, but `memory_facts` grows by ~1 row per meaningful turn per user (that's the fastest-growing table in the schema by an order of magnitude), so the sequential-scan cost would have compounded quickly once real usage lands. Fixing it now is O(minutes) of work; fixing it later, after the table is 10M rows, is a maintenance window.
+
+Skipped by design (parent tables are static enum-style lookups that never see PK changes or deletes — the FK index would add write cost with no read benefit):
+- `characters.occupationId`, `characters.personalityArchetypeId`, `characters.relationshipArchetypeId`, `characters.voicePresetId`
+- `model_configs.updatedByUserId` (audit-only column, tiny table)
+
+#### Changes
+- **New indexes** (all single-column btree, `IF NOT EXISTS`):
+  - `memory_facts_characterId_idx` on `memory_facts (characterId)`
+  - `memory_facts_sourceMessageId_idx` on `memory_facts (sourceMessageId)`
+  - `conversations_characterId_idx` on `conversations (characterId)`
+  - `messages_mediaGenerationId_idx` on `messages (mediaGenerationId)`
+  - `call_sessions_characterId_idx` on `call_sessions (characterId)`
+  - `media_generations_characterId_idx` on `media_generations (characterId)`
+  - `relationship_states_characterId_idx` on `relationship_states (characterId)`
+  - `relationship_milestones_characterId_idx` on `relationship_milestones (characterId)`
+- **Prisma schema:** added matching `@@index([characterId])` (and `@@index([sourceMessageId])`) on `Conversation`, `MemoryFact`, `RelationshipState`, `RelationshipMilestone`, `CallSession` so Prisma's schema stays the source of truth. `messages.mediaGenerationId` and `media_generations.characterId` are indexed at the SQL layer only — those columns / tables live in the DB but are not (yet) declared in `schema.prisma`.
+
+#### Verification
+- All 8 indexes report `pg_index.indisvalid = true` and `indisready = true` on `ca-central-1` Supabase project `gzcgysguomhzztmwxugx`.
+- Planner picks the new index for `EXPLAIN SELECT id FROM memory_facts WHERE characterId = ...` (`Index Scan using memory_facts_characterId_idx`, cost 0.14..2.10). Same for `conversations`.
+- Post-migration advisor run: `unindexed_foreign_keys` warnings dropped from **13 → 5** (the 5 remaining are the intentionally-skipped set above).
+- The new indexes will show as `unused_index` in the advisor for a short period after this migration — that's expected (`pg_stat_user_indexes.idx_scan` starts at 0). They'll drop off once real traffic exercises the FK cascade / character-scoped queries.
+
+#### Why not `CREATE INDEX CONCURRENTLY`
+Prisma wraps each migration file in a transaction and `CREATE INDEX CONCURRENTLY` cannot run inside one. Rewriting the migration runner to bypass transactions for a single migration was more risk than the plain form. On the current table sizes (all under 1k rows) the plain `CREATE INDEX` takes <100ms per index and holds a `SHARE` lock only for that window. **If any of these tables crosses ~1M rows before this migration ships to prod, rebuild the affected index CONCURRENTLY via a one-off admin script instead of re-running this migration.**
+
+#### Rollback
+```sql
+DROP INDEX IF EXISTS "public"."memory_facts_characterId_idx";
+DROP INDEX IF EXISTS "public"."memory_facts_sourceMessageId_idx";
+DROP INDEX IF EXISTS "public"."conversations_characterId_idx";
+DROP INDEX IF EXISTS "public"."messages_mediaGenerationId_idx";
+DROP INDEX IF EXISTS "public"."call_sessions_characterId_idx";
+DROP INDEX IF EXISTS "public"."media_generations_characterId_idx";
+DROP INDEX IF EXISTS "public"."relationship_states_characterId_idx";
+DROP INDEX IF EXISTS "public"."relationship_milestones_characterId_idx";
+```
+Then revert the `@@index` additions in `prisma/schema.prisma` and delete this migration folder.
+
+#### Related work
+- Supabase performance advisor rule `0001_unindexed_foreign_keys` — <https://supabase.com/docs/guides/database/database-linter?lint=0001_unindexed_foreign_keys>
+- Prisma `_prisma_migrations` synced via `npx prisma migrate resolve --applied 20260804120000_add_fk_covering_indexes`.
+
+---
+
 ### 20260804110000_dedupe_memory_facts
 
 **Date:** 2026-08-04
