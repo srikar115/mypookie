@@ -3,6 +3,27 @@ import type { Message, MessageRole, PrismaClient } from "@prisma/client";
 import type { MessageRepository } from "../application/ports/message-repository";
 import type { MessageDto } from "../application/dto/message.dto";
 
+/**
+ * The linked generation's state travels with the message. Without it a
+ * reloaded thread knows a bubble *is* media but not that it finished, so it
+ * renders a pending spinner over an image that has been sitting in storage for
+ * an hour.
+ *
+ * Only the three display fields are selected — the prompt, provider request id,
+ * and cost have no business in the chat transcript.
+ */
+const MEDIA_INCLUDE = {
+  mediaGeneration: { select: { status: true, storageUrl: true, kind: true } },
+} as const;
+
+type MessageRow = Message & {
+  mediaGeneration?: {
+    status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+    storageUrl: string | null;
+    kind: "IMAGE" | "VIDEO";
+  } | null;
+};
+
 export class PrismaMessageRepository implements MessageRepository {
   constructor(private readonly db: PrismaClient) {}
 
@@ -16,6 +37,7 @@ export class PrismaMessageRepository implements MessageRepository {
       where: { conversationId },
       orderBy: { createdAt: "desc" },
       take: limit,
+      include: MEDIA_INCLUDE,
     });
     return rows.reverse().map(toDto);
   }
@@ -34,6 +56,7 @@ export class PrismaMessageRepository implements MessageRepository {
       },
       orderBy: { createdAt: "desc" },
       take: input.limit,
+      include: MEDIA_INCLUDE,
     });
     return rows.map(toDto);
   }
@@ -119,7 +142,8 @@ export class PrismaMessageRepository implements MessageRepository {
   }
 }
 
-function toDto(row: Message): MessageDto {
+function toDto(row: MessageRow): MessageDto {
+  const media = row.mediaGeneration ?? null;
   return {
     id: row.id,
     conversationId: row.conversationId,
@@ -132,5 +156,9 @@ function toDto(row: Message): MessageDto {
     modelId: row.modelId,
     errorMessage: row.errorMessage,
     createdAt: row.createdAt.toISOString(),
+    mediaGenerationId: row.mediaGenerationId ?? null,
+    mediaStatus: media?.status ?? null,
+    mediaUrl: media?.storageUrl ?? null,
+    mediaKind: media?.kind ?? null,
   };
 }

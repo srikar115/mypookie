@@ -12,7 +12,10 @@ import {
   ChatCharacterUnavailableError,
   ConversationAccessDeniedError,
   ConversationNotFoundError,
+  OpenerNotWarrantedError,
 } from "../../domain/errors";
+import { decideOpener } from "../../domain/opener-policy";
+import type { Clock } from "@/shared/application/clock";
 
 export interface BuiltOpenerContext {
   readonly character: ChatCharacterProfile;
@@ -46,6 +49,7 @@ export class BuildOpenerContextUseCase {
     private readonly memory: MemoryContextProvider,
     private readonly composer: PromptComposer,
     private readonly historyLimit: number,
+    private readonly clock: Clock,
   ) {}
 
   async execute(input: {
@@ -67,19 +71,27 @@ export class BuildOpenerContextUseCase {
       throw new ChatCharacterUnavailableError(conv.characterId);
     }
 
-    const [history, memoryBlock] = await Promise.all([
-      this.messages.listRecent(conv.id, this.historyLimit),
-      this.memory.getMemoryBlock({
-        userId: input.actorUserId,
-        characterId: conv.characterId,
-        conversationId: conv.id,
-        // No user message to key retrieval off — the memory provider
-        // handles empty strings by falling back to relationship state
-        // + top facts by recency instead of by similarity.
-        userMessage: "",
-        userDisplayName: input.actorDisplayName ?? null,
-      }),
-    ]);
+    // Gate on history before spending anything on memory retrieval or the
+    // LLM. The client applies the same rule to avoid a pointless round
+    // trip, but it can't be the only check: remounts, reloads, StrictMode,
+    // and second tabs all slip past it, and every opener that gets through
+    // is persisted into the thread permanently.
+    const history = await this.messages.listRecent(conv.id, this.historyLimit);
+    const decision = decideOpener(history, this.clock.now());
+    if (!decision.warranted) {
+      throw new OpenerNotWarrantedError(decision.reason);
+    }
+
+    const memoryBlock = await this.memory.getMemoryBlock({
+      userId: input.actorUserId,
+      characterId: conv.characterId,
+      conversationId: conv.id,
+      // No user message to key retrieval off — the memory provider
+      // handles empty strings by falling back to relationship state
+      // + top facts by recency instead of by similarity.
+      userMessage: "",
+      userDisplayName: input.actorDisplayName ?? null,
+    });
 
     const messages = this.composer.composeOpener({
       character,

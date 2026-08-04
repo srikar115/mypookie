@@ -122,5 +122,6 @@ export function createBuildOpenerContextUseCase(
     memory,
     createPromptComposer(),
     env.CHAT_MAX_HISTORY_TURNS,
+    ctx.clock,
   );
 }

@@ -7,6 +7,7 @@ import {
   ConversationNotFoundError,
   createAppendAssistantMessageUseCase,
   createBuildOpenerContextUseCase,
+  OpenerNotWarrantedError,
   sanitizeAssistantReply,
 } from "@/modules/chat";
 import { createAssembleContextUseCase } from "@/modules/memory";
@@ -73,6 +74,16 @@ export async function POST(
       actorDisplayName: server.actor.displayName,
     });
   } catch (e) {
+    // Not an error: the character simply shouldn't speak first right now
+    // (the user is mid-turn, an unanswered opener is already sitting
+    // there, or the last exchange is too fresh). The client treats
+    // `skipped` as "no opener this time" and renders nothing.
+    if (e instanceof OpenerNotWarrantedError) {
+      console.info(
+        `[chat.opener] skipped (reason=${e.reason}, conversation=${conversationId})`,
+      );
+      return Response.json({ ok: true, skipped: true });
+    }
     return handleDomainError(e);
   }
 

@@ -52,6 +52,11 @@ export class BuildChatContextUseCase {
      * fact extraction has captured it.
      */
     actorDisplayName?: string | null;
+    /**
+     * Set by the delivery layer when a generation is already firing for this
+     * turn, so the reply reads as the caption on the incoming photo.
+     */
+    pendingMedia?: "image" | "video" | null;
   }): Promise<BuiltChatContext> {
     const conv = await this.conversations.findById(input.conversationId);
     if (!conv) throw new ConversationNotFoundError(input.conversationId);
@@ -85,6 +90,7 @@ export class BuildChatContextUseCase {
       memoryBlock,
       history,
       latestUserMessage: input.latestUserMessage,
+      pendingMedia: input.pendingMedia ?? null,
     });
 
     return { character, messages, historyTurnCount: history.length };

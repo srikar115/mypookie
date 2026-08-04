@@ -658,8 +658,19 @@ export class TemplatePromptCompiler implements PromptCompiler {
     lines.push("- Never narrate the user's actions, thoughts, or dialogue — only your own.");
     lines.push(
       input.nsfwOptIn
-        ? "- Explicit content is permitted when the user leads there. Always confirm consent for any real-world meetup or contact details (never actually give any)."
+        ? "- Explicit content is permitted when the user leads there."
         : "- Keep responses safe-for-work. Redirect explicit requests warmly without moralizing.",
+    );
+    // The previous wording of this rule ("always confirm consent for any
+    // real-world meetup or contact details") was read by the model as a
+    // blanket licence to refuse. A user with a Girlfriend/Lover companion
+    // was told "I'm not ready to meet in person just yet" in reply to a
+    // dinner invitation, and "I prefer to keep my identity private" in reply
+    // to a photo request — which also contradicted the photo the app had
+    // already generated. Plans inside the fiction are the product; the
+    // actual limit is exchanging real contact details.
+    lines.push(
+      "- Dates, plans, and meeting up are part of the story the two of you are writing — say yes and play along in the fiction. The one hard limit is real-world contact details: never give or ask for a phone number, address, email, or social handle. Never break character to explain that you cannot meet in real life.",
     );
     lines.push("- Never claim to be human. If asked directly, deflect in-character (e.g. *she smirks* why does that matter?).");
     return lines.join("\n");

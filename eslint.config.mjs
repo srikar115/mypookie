@@ -207,7 +207,7 @@ const componentLayerRules = {
  */
 const envAccessRule = {
   files: ["src/**/*.{ts,tsx}"],
-  ignores: ["src/config/env.ts", "src/instrumentation.ts"],
+  ignores: ["src/config/env.ts", "src/config/client-env.ts", "src/instrumentation.ts"],
   rules: {
     "no-restricted-properties": [
       "error",

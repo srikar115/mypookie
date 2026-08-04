@@ -67,6 +67,168 @@ Link references.
 Newest entries at the top.
 -->
 
+### 20260804110000_dedupe_memory_facts
+
+**Date:** 2026-08-04
+**Author:** amorify agent
+**Status:** Applied
+
+#### Purpose
+Stops `memory_facts` accumulating duplicate rows. The fact extractor runs once per turn with no knowledge of what is already stored, and `insertFacts` did a bare `INSERT`, so restating anything durable wrote another row. A production thread held 14 facts of which 11 were the identical string `"The user is named Karthik."`. Retrieval reads only the top `MEMORY_TOP_K` (5) facts, so the memory block was that one fact repeated and the genuinely useful facts never reached the prompt — presenting to the user as the companion having no memory.
+
+Enforced in the database rather than the extractor because the extractor is an LLM call and cannot be relied on to gate repeats. The adapter pairs these indexes with `ON CONFLICT DO NOTHING`.
+
+#### Changes
+- **Altered tables:** `memory_facts` — duplicate rows deleted (earliest kept, preserving `extractedAt` and therefore the recency signal in hybrid search)
+- **New indexes:**
+  - `memory_facts_user_character_content_key` — partial UNIQUE on `(userId, characterId, lower(btrim(content)))` where `characterId IS NOT NULL`
+  - `memory_facts_user_character_identity_key` — partial UNIQUE on `(userId, characterId, (metadata->>'key'))` where `characterId IS NOT NULL AND category = 'IDENTITY' AND metadata ? 'key'`, collapsing re-phrasings of one attribute ("the user is named X" / "the user's name is X"). The authoritative identity copy lives in `user_profiles.structuredFacts`, which already upserts by key.
+- **New tables / enums / extensions / RLS:** none
+
+**Both indexes are raw-SQL-only** and cannot be modelled in `schema.prisma` (partial + functional). They join the existing do-not-drop list below — a Prisma diff will want to remove them.
+
+#### Rollback
+```sql
+DROP INDEX IF EXISTS "memory_facts_user_character_content_key";
+DROP INDEX IF EXISTS "memory_facts_user_character_identity_key";
+```
+Deleted duplicate rows are **not** recoverable. They carried no information the surviving row does not, but restore from a snapshot if the exact row count matters. Revert `ON CONFLICT DO NOTHING` in `prisma-memory.store.ts` at the same time, or writes silently no-op against a table that no longer rejects them.
+
+---
+
+### 20260803120100_seed_chat_media_model_configs
+
+**Date:** 2026-08-03
+**Author:** amorify agent
+**Status:** Applied
+
+#### Purpose
+Seeds one `model_configs` row per in-chat generation purpose. **Split out from `20260803120000_chat_media_generation` on purpose:** Postgres refuses to use a new enum value inside the same transaction that added it (`unsafe use of new value ... of enum type`). The four `CHAT_*` `ModelPurpose` values are added by the preceding migration, so they are committed by the time these INSERTs run.
+
+#### Changes
+- **Seed rows** (idempotent via `ON CONFLICT ("purpose") DO UPDATE`; `model_configs.purpose` is UNIQUE):
+  - `CHAT_IMAGE_EDIT` → FAL `fal-ai/wan/v2.7/edit` — **active**, default for chat images. Takes `image_urls[0]` as the character reference.
+  - `CHAT_IMAGE_TEXT_TO_IMAGE` → FAL `fal-ai/wan/v2.7/text-to-image` — **active**, fallback when no reference image resolves.
+  - `CHAT_VIDEO_TEXT_TO_VIDEO` → FAL `fal-ai/wan/v2.7/text-to-video` — **inactive** placeholder.
+  - `CHAT_VIDEO_IMAGE_TO_VIDEO` → FAL `fal-ai/bytedance/seedance/v1.5/pro/image-to-video` — **inactive** placeholder.
+- No DDL.
+
+#### Gotcha
+`model_configs.updatedAt` is `NOT NULL` with **no database default** — Prisma's `@updatedAt` is applied client-side, not by Postgres. Any raw-SQL INSERT into this table must pass `updatedAt` explicitly or it fails with a not-null violation.
+
+#### Rollback
+```sql
+DELETE FROM "model_configs"
+WHERE "purpose" IN (
+  'CHAT_IMAGE_EDIT',
+  'CHAT_IMAGE_TEXT_TO_IMAGE',
+  'CHAT_VIDEO_TEXT_TO_VIDEO',
+  'CHAT_VIDEO_IMAGE_TO_VIDEO'
+);
+```
+
+---
+
+### 20260803120000_chat_media_generation
+
+**Date:** 2026-08-03
+**Author:** amorify agent
+**Status:** Applied
+
+#### Purpose
+Ships the in-chat image and video generation pipeline. Extends `ModelPurpose` with four new values for fal.ai-backed generation, adds a `media_generations` table to track the full lifecycle (PENDING → RUNNING → COMPLETED | FAILED), and adds a `user_ai_prefs` table for per-user model-slug overrides. A nullable `messages.mediaGenerationId` foreign key links assistant placeholder messages to their generation row so the chat UI can render a MediaBubble in place of a text bubble.
+
+The seed rows for the new purposes live in the follow-up migration `20260803120100_seed_chat_media_model_configs` (see its note on the enum/transaction restriction).
+
+#### Column-type note
+All column types in this migration were taken verbatim from `prisma migrate diff` so the database matches `schema.prisma` exactly and no drift is introduced:
+- ids are `UUID` with **no** database default — the client supplies them via `IdGenerator`, consistent with every other table in this schema
+- timestamps are `TIMESTAMP(3)`, matching Prisma's default `DateTime` mapping (not `TIMESTAMPTZ`)
+
+#### Changes
+- **Altered enums:**
+  - `ModelPurpose` += `CHAT_IMAGE_EDIT`, `CHAT_IMAGE_TEXT_TO_IMAGE`, `CHAT_VIDEO_TEXT_TO_VIDEO`, `CHAT_VIDEO_IMAGE_TO_VIDEO`
+- **New enums:**
+  - `MediaKind` (IMAGE, VIDEO)
+  - `MediaGenerationStatus` (PENDING, RUNNING, COMPLETED, FAILED)
+- **New tables:**
+  - `media_generations` — full generation lifecycle with prompt, model slug, provider request ID, R2 storage key/URL, credit cost, and JSONB metadata (seed, style, aspect, editMode, referenceMediaId)
+  - `user_ai_prefs` — per-user model slug overrides for image/video generation; null means "use admin default from model_configs"
+- **Altered tables:**
+  - `messages.mediaGenerationId UUID?` — nullable FK → `media_generations.id` (SET NULL)
+- **New indexes:**
+  - `media_generations_userId_characterId_status_createdAt_idx` (btree, DESC on createdAt)
+  - `media_generations_conversationId_createdAt_idx` (btree, DESC on createdAt)
+  - `user_ai_prefs_userId_key` (unique btree)
+  - No index on `messages.mediaGenerationId`: messages are only ever queried by `conversationId`, never by generation id, and adding one would diverge from `schema.prisma`.
+- **Foreign keys / relations:**
+  - `media_generations.userId → users.id` (CASCADE)
+  - `media_generations.characterId → characters.id` (CASCADE)
+  - `media_generations.conversationId → conversations.id` (CASCADE)
+  - `user_ai_prefs.userId → users.id` (CASCADE, UNIQUE userId)
+  - `messages.mediaGenerationId → media_generations.id` (SET NULL)
+- **Seed rows:** none — moved to `20260803120100_seed_chat_media_model_configs`
+- **RLS:** enabled on both new tables with no policies (Prisma bypasses via superuser)
+
+#### Table Details
+
+##### `media_generations`
+| Column | Type | Nullable | Default | Notes |
+|---|---|---|---|---|
+| id | UUID | NO | — | PK; client-supplied via IdGenerator (no DB default) |
+| userId | UUID | NO | — | FK → users.id CASCADE |
+| characterId | UUID | NO | — | FK → characters.id CASCADE |
+| conversationId | UUID | NO | — | FK → conversations.id CASCADE |
+| kind | MediaKind | NO | — | IMAGE or VIDEO |
+| status | MediaGenerationStatus | NO | PENDING | PENDING→RUNNING→COMPLETED|FAILED |
+| prompt | TEXT | NO | — | User-supplied or extracted scene |
+| finalPrompt | TEXT | YES | — | Enriched prompt actually sent to fal |
+| modelSlug | TEXT | YES | — | fal model slug used |
+| providerRequestId | TEXT | YES | — | fal queue request_id for resumability |
+| storageKey | TEXT | YES | — | R2 object key |
+| storageUrl | TEXT | YES | — | Public/signed URL to completed asset |
+| costCredits | INT | NO | 0 | Credit cost; locked at creation |
+| metadata | JSONB | NO | `{}` | seed, style, aspectRatio, editMode, referenceMediaId |
+| errorMessage | TEXT | YES | — | Set on FAILED status |
+| createdAt | TIMESTAMP(3) | NO | CURRENT_TIMESTAMP | |
+| completedAt | TIMESTAMP(3) | YES | — | Set when status → COMPLETED |
+| updatedAt | TIMESTAMP(3) | NO | — | No DB default; Prisma `@updatedAt` sets it client-side |
+
+##### `user_ai_prefs`
+| Column | Type | Nullable | Default | Notes |
+|---|---|---|---|---|
+| id | UUID | NO | — | PK; client-supplied (no DB default) |
+| userId | UUID | NO | — | FK → users.id CASCADE, UNIQUE |
+| imageModel | TEXT | YES | — | fal slug override; null = admin default |
+| videoModel | TEXT | YES | — | fal slug override; null = admin default |
+| imageAspect | TEXT | YES | — | e.g. "1:1", "9:16" |
+| videoAspect | TEXT | YES | — | |
+| videoDuration | INT | YES | — | seconds |
+| createdAt | TIMESTAMP(3) | NO | CURRENT_TIMESTAMP | |
+| updatedAt | TIMESTAMP(3) | NO | — | No DB default; Prisma `@updatedAt` |
+
+#### Rollback
+```sql
+-- Remove FK from messages
+ALTER TABLE "messages" DROP COLUMN IF EXISTS "mediaGenerationId";
+
+-- Drop new tables
+DROP TABLE IF EXISTS "user_ai_prefs"    CASCADE;
+DROP TABLE IF EXISTS "media_generations" CASCADE;
+
+-- Drop new enums
+DROP TYPE IF EXISTS "MediaGenerationStatus";
+DROP TYPE IF EXISTS "MediaKind";
+
+-- Revert ModelPurpose additions (Postgres can't remove enum values;
+-- this is a schema-drift comment — leave enum values in place unless
+-- the enum is being fully replaced).
+-- To cleanly revert: re-create the enum without the four CHAT_* values
+-- and update all model_config rows, then swap the column type.
+```
+
+---
+
 ### 20260728120642_add_chat_memory_and_model_config
 
 **Date:** 2026-07-28
@@ -374,7 +536,18 @@ DROP TYPE  IF EXISTS "UserRole";
 | Foreign keys | 10 |
 | CHECK constraints | 9 (all on `characters` + 1 on `character_appearance_profiles`) |
 | Extensions | 4 (`vector`, `pg_trgm`, `pgcrypto`, `unaccent`, all in schema `extensions`) |
-| RLS-enabled tables | 12 / 12 |
+| RLS-enabled tables | 14 / 14 (+`media_generations`, `user_ai_prefs`) |
+| Migrations applied | 16 |
+
+### Known drift (pre-existing, do not "fix" blindly)
+
+`prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma` reports differences that must **not** be applied wholesale:
+
+- **`DROP INDEX` on `characters_name_trgm_idx`, `characters_tags_gin_idx`, `memory_facts_embedding_hnsw_idx`, `memory_facts_entities_gin_idx`, `memory_facts_user_char_idx`, `memory_facts_user_extracted_idx`, `character_appearance_profiles_face_embedding_idx`** — these are trigram / GIN / HNSW indexes created via raw SQL. Prisma cannot model them, so every diff wants to drop them. Applying that would silently destroy search and vector-similarity performance.
+- **`DROP INDEX` on `memory_facts_user_character_content_key`, `memory_facts_user_character_identity_key`** — partial + functional UNIQUE indexes from `20260804110000_dedupe_memory_facts`, also unmodellable in Prisma. Dropping them lets duplicate facts accumulate again and crowd every real memory out of the retrieval window.
+- **`call_sessions` FK drop/re-add + `ALTER COLUMN id DROP DEFAULT` + `updatedAt DROP DEFAULT`**, and **`wizard_option_previews.id DROP DEFAULT`** — hand-written voice/wizard migrations added DB-level defaults that Prisma does not declare.
+
+When writing a new hand-written migration, generate the diff for reference but copy only the statements relevant to your change.
 
 ---
 

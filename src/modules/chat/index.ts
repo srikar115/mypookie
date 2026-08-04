@@ -24,6 +24,7 @@ export {
   ConversationAccessDeniedError,
   ConversationNotFoundError,
   ChatCharacterUnavailableError,
+  OpenerNotWarrantedError,
 } from "./domain/errors";
 
 export {
@@ -31,6 +32,12 @@ export {
   humanizeTtsMarkers,
   sanitizeAssistantReply,
 } from "./domain/sanitize-reply";
+
+export {
+  stripVisualActionSentinel,
+  parseVisualAction,
+} from "./domain/visual-action";
+export type { VisualActionPayload } from "./domain/visual-action";
 
 export {
   createConversationRepository,

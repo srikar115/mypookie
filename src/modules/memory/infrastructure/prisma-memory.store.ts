@@ -21,6 +21,8 @@ export class PrismaMemoryStore implements MemoryStore {
   }): Promise<number> {
     if (input.drafts.length === 0) return 0;
 
+    const drafts = dedupeDrafts(input.drafts);
+
     // Raw SQL (instead of `createMany`) because Prisma has no first-class
     // type for pgvector — `memory_facts.embedding` is Unsupported("vector(1024)").
     // We serialize each vector as a pgvector text literal (`[v1,v2,...]`) and
@@ -28,8 +30,7 @@ export class PrismaMemoryStore implements MemoryStore {
     // draft keeps the code straightforward and turns emit ≤ 4 facts, so the
     // per-turn round-trip cost is negligible against the LLM call preceding it.
     let inserted = 0;
-    for (let i = 0; i < input.drafts.length; i++) {
-      const d = input.drafts[i]!;
+    for (const { draft: d, index: i } of drafts) {
       const rawEmbedding = input.embeddings?.[i] ?? null;
       const embeddingLiteral = toPgVectorLiteral(rawEmbedding);
       const entities = [...d.entities];
@@ -56,7 +57,8 @@ export class PrismaMemoryStore implements MemoryStore {
           ${input.now},
           ${d.expiresAt ?? null},
           ${embeddingLiteral}::vector
-        );
+        )
+        ON CONFLICT DO NOTHING;
       `;
       inserted += Number(affected);
     }
@@ -116,6 +118,41 @@ export class PrismaMemoryStore implements MemoryStore {
       },
     });
   }
+}
+
+/**
+ * Collapses repeats inside a single extraction batch, keeping the first
+ * occurrence and its index (the index is what aligns a draft with its
+ * embedding).
+ *
+ * The database enforces the same rule across turns via two partial unique
+ * indexes plus `ON CONFLICT DO NOTHING`. This pass exists because a single
+ * batch can conflict with *itself*, and an intra-statement conflict is not
+ * something `ON CONFLICT` can resolve — it would just silently drop the
+ * second row after paying for its embedding.
+ *
+ * Matching mirrors the indexes exactly: normalized content, and for IDENTITY
+ * facts the `metadata.key` attribute, so "the user is named X" and "the
+ * user's name is X" count as one.
+ */
+function dedupeDrafts(
+  drafts: readonly MemoryFactDraft[],
+): Array<{ draft: MemoryFactDraft; index: number }> {
+  const seen = new Set<string>();
+  const out: Array<{ draft: MemoryFactDraft; index: number }> = [];
+  for (let i = 0; i < drafts.length; i++) {
+    const draft = drafts[i]!;
+    const keys = [`c:${draft.content.trim().toLowerCase()}`];
+    const identityKey =
+      draft.category === "IDENTITY" ? draft.metadata?.key : undefined;
+    if (typeof identityKey === "string" && identityKey.length > 0) {
+      keys.push(`i:${identityKey}`);
+    }
+    if (keys.some((k) => seen.has(k))) continue;
+    for (const k of keys) seen.add(k);
+    out.push({ draft, index: i });
+  }
+  return out;
 }
 
 function clamp(v: number, min: number, max: number): number {

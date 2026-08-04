@@ -54,6 +54,8 @@ model User {
   relationshipMilestones RelationshipMilestone[]
   modelConfigUpdates     ModelConfig[]           @relation("ModelConfigUpdatedBy")
   callSessions           CallSession[]
+  mediaGenerations       MediaGeneration[]
+  aiPrefs                UserAiPrefs?
 
   @@index([email])
   @@index([status])
@@ -311,6 +313,7 @@ model Character {
   relationshipStates     RelationshipState[]
   relationshipMilestones RelationshipMilestone[]
   callSessions           CallSession[]
+  mediaGenerations       MediaGeneration[]
 
   @@index([ownerUserId])
   @@index([ownerUserId, status])
@@ -560,6 +563,14 @@ enum ModelPurpose {
   VOICE_STT
   VOICE_LLM
   VOICE_TTS
+  // In-chat media generation — separate from the wizard portrait path so
+  // admins can tune the chat-media model independently. EDIT variants use
+  // reference-image-locked endpoints; TEXT_TO_* are the fallback when no
+  // reference is available (sibling-swap rule).
+  CHAT_IMAGE_EDIT
+  CHAT_IMAGE_TEXT_TO_IMAGE
+  CHAT_VIDEO_TEXT_TO_VIDEO
+  CHAT_VIDEO_IMAGE_TO_VIDEO
 }
 
 enum ModelProvider {
@@ -584,11 +595,12 @@ model Conversation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user         User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
-  character    Character            @relation(fields: [characterId], references: [id], onDelete: Cascade)
-  messages     Message[]
-  summary      ConversationSummary?
-  callSessions CallSession[]
+  user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character        Character            @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  messages         Message[]
+  summary          ConversationSummary?
+  callSessions     CallSession[]
+  mediaGenerations MediaGeneration[]
 
   @@unique([userId, characterId])
   @@index([userId, lastMessageAt(sort: Desc)])
@@ -618,10 +630,16 @@ model Message {
   audioR2Key    String?
   ttsMarkupTags String[]      @default([])
 
+  // Media generation link — set when this assistant message is a placeholder
+  // for an in-progress or completed image/video generation. The UI renders the
+  // MediaGeneration bubble instead of a text bubble when this is non-null.
+  mediaGenerationId String? @db.Uuid
+
   createdAt DateTime @default(now())
 
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  extractedFacts MemoryFact[]
+  conversation    Conversation     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  extractedFacts  MemoryFact[]
+  mediaGeneration MediaGeneration? @relation(fields: [mediaGenerationId], references: [id], onDelete: SetNull)
 
   @@index([conversationId, createdAt])
   @@map("messages")
@@ -655,6 +673,95 @@ model ConversationSummary {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@map("conversation_summaries")
+}
+
+// ─── Media Generations (in-chat image / video) ────────────────────────────────
+
+model MediaGeneration {
+  id             String                @id @default(uuid()) @db.Uuid
+  userId         String                @db.Uuid
+  characterId    String                @db.Uuid
+  conversationId String                @db.Uuid
+  kind           MediaKind
+  status         MediaGenerationStatus @default(PENDING)
+
+  // Prompt supplied by the user or extracted from the message.
+  prompt String @db.Text
+
+  // Enriched prompt actually sent to fal (includes identity, style, etc.).
+  finalPrompt String? @db.Text
+
+  // fal model slug that ran this generation.
+  modelSlug String?
+
+  // fal's queue request ID — used for resumable polling if the server
+  // restarts mid-generation (stored as TEXT because fal IDs are opaque).
+  providerRequestId String?
+
+  // R2 key + public URL for the completed asset.
+  storageKey String?
+  storageUrl String?
+
+  // Credit reservation: cost is locked at creation and released/charged
+  // on completion. Consistent with the reservation pattern used by voice.
+  costCredits Int @default(0)
+
+  // Free-form bag: seed, style, aspectRatio, editMode, referenceMediaId.
+  metadata Json @default("{}")
+
+  errorMessage String? @db.Text
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  character    Character    @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messages     Message[]
+
+  @@index([userId, characterId, status, createdAt(sort: Desc)])
+  @@index([conversationId, createdAt(sort: Desc)])
+  @@map("media_generations")
+}
+
+enum MediaKind {
+  IMAGE
+  VIDEO
+}
+
+enum MediaGenerationStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+// ─── User AI Preferences ──────────────────────────────────────────────────────
+
+model UserAiPrefs {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @unique @db.Uuid
+
+  // Per-user model slug overrides. Null means "use the admin default from
+  // model_configs". Power users can paste a fal slug here; the UI is behind
+  // a hidden advanced-defaults panel, never in the MediaComposer.
+  imageModel String?
+  videoModel String?
+
+  // Aspect-ratio preferences. Null → per-kind defaults from src/config/media.ts.
+  imageAspect String?
+  videoAspect String?
+
+  // Duration preference for video (seconds). Null → 5s default.
+  videoDuration Int?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_ai_prefs")
 }
 
 // ─── Memory (Layer 2 + Layer 3a) ──────────────────────────────────────────────

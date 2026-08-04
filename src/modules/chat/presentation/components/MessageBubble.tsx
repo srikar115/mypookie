@@ -56,6 +56,16 @@ export interface ChatMessage {
    * server responses; new code paths set `errorCode` instead.
    */
   readonly errorMessage?: string | null;
+  /**
+   * Non-null when this assistant bubble is backed by a media generation.
+   * MediaBubble is rendered instead of text content when set.
+   */
+  readonly mediaGenerationId?: string | null;
+  /** Current media status — polled by useMediaGeneration. */
+  readonly mediaStatus?: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | null;
+  /** Public URL to the completed asset. */
+  readonly mediaUrl?: string | null;
+  readonly mediaKind?: "IMAGE" | "VIDEO" | null;
 }
 
 interface Props {

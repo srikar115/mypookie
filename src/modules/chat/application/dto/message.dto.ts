@@ -29,4 +29,14 @@ export interface MessageDto {
   readonly modelId: string | null;
   readonly errorMessage: string | null;
   readonly createdAt: string;
+  /** Non-null when this message is a media generation placeholder. */
+  readonly mediaGenerationId: string | null;
+  /**
+   * Persisted state of the linked generation, so a reloaded thread renders the
+   * finished asset instead of restarting at a spinner it can never leave.
+   * All null when `mediaGenerationId` is null.
+   */
+  readonly mediaStatus: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | null;
+  readonly mediaUrl: string | null;
+  readonly mediaKind: "IMAGE" | "VIDEO" | null;
 }

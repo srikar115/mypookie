@@ -60,5 +60,9 @@ export function dtoToChatMessage(m: MessageDto): ChatMessage {
     text,
     at: new Date(m.createdAt),
     errorMessage: m.errorMessage,
+    mediaGenerationId: m.mediaGenerationId ?? null,
+    mediaStatus: m.mediaStatus ?? null,
+    mediaUrl: m.mediaUrl ?? null,
+    mediaKind: m.mediaKind ?? null,
   };
 }

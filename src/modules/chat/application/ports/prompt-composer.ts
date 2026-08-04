@@ -35,6 +35,12 @@ export interface PromptComposer {
     history: readonly MessageDto[];
     latestUserMessage: string;
     mode?: PromptMode;
+    /**
+     * Set when the app has already decided to generate media for this turn.
+     * The reply is then written as the caption on a photo the user is about
+     * to see, rather than as an independent answer that may contradict it.
+     */
+    pendingMedia?: "image" | "video" | null;
   }): readonly LlmMessage[];
 
   /**

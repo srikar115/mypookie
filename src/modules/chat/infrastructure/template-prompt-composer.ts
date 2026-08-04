@@ -51,6 +51,7 @@ export class TemplatePromptComposer implements PromptComposer {
     history: readonly MessageDto[];
     latestUserMessage: string;
     mode?: PromptMode;
+    pendingMedia?: "image" | "video" | null;
   }): readonly LlmMessage[] {
     const mode: PromptMode = input.mode ?? "text";
     const conversationalHistory = input.history.filter(
@@ -60,12 +61,16 @@ export class TemplatePromptComposer implements PromptComposer {
       mode === "voice" && conversationalHistory.length > 0
         ? buildRecentChatHighlights(conversationalHistory)
         : "";
-    const system = buildSystemPrompt({
+    const base = buildSystemPrompt({
       character: input.character,
       memoryBlock: input.memoryBlock,
       recentHighlights: highlights,
       mode,
     });
+    // Appended last so it outranks the general photo protocol above it.
+    const system = input.pendingMedia
+      ? `${base}\n${buildPendingMediaDirective(input.pendingMedia)}`
+      : base;
     const historyLlmMessages = mapHistory(input.history, mode);
 
     return [
@@ -190,43 +195,84 @@ function buildSystemPrompt(input: {
  * A native-modality turn (text-in-text, voice-in-voice) is left
  * untouched — no tag, no strip.
  */
+/**
+ * What an image/video turn looks like to the model.
+ *
+ * Media messages are stored with empty content — the bubble renders from
+ * the linked MediaGeneration row, not from text. Passed through verbatim
+ * they reach the model as `{role:"assistant", content:""}`, which is
+ * actively harmful in two ways: the character has no idea it ever sent a
+ * photo (so "so what's next?" after four pictures reads as a non sequitur),
+ * and a run of blank assistant turns is a worked example of replying with
+ * nothing. A thread with five of them and one real reply produced flat,
+ * styleless answers with no action beats at all.
+ *
+ * The voice variants carry no asterisks — `stripVisualCues` would erase
+ * them and put us back at an empty turn.
+ */
+const MEDIA_STAND_IN = {
+  text: { IMAGE: "*sends a photo*", VIDEO: "*sends a short video*" },
+  voice: { IMAGE: "(sent a photo)", VIDEO: "(sent a short video)" },
+} as const;
+
 function mapHistory(
   history: readonly MessageDto[],
   mode: PromptMode,
 ): LlmMessage[] {
-  return history
-    .filter((m) => m.role === "USER" || m.role === "ASSISTANT")
-    .map((m) => {
-      const role: "user" | "assistant" =
-        m.role === "USER" ? "user" : "assistant";
+  const out: LlmMessage[] = [];
 
-      let content = m.content;
-      if (mode === "voice") {
-        // Strip visual cues from prior assistant TEXT turns so a
-        // freshly-loaded call doesn't inherit "*she leans in*" style.
-        // User turns are left as-is (they're what the user actually
-        // said or typed).
-        if (m.role === "ASSISTANT" && m.source !== "VOICE") {
-          content = stripVisualCues(content);
-        }
-        // Tag text-source turns to signal "typed, not spoken".
-        if (m.source !== "VOICE") {
-          content = `[text chat] ${content}`;
-        }
-      } else {
-        // In text mode, tag voice-source turns so the model doesn't
-        // imitate the spoken style into a novel-style text reply.
-        // Also convert leftover TTS markers (`[laugh]`) to asterisk
-        // beats so the history already looks like text-chat style —
-        // that stops the model from echoing bracket markers into the
-        // typed reply.
-        if (m.source === "VOICE") {
-          content = `[voice call] ${humanizeTtsMarkers(content)}`;
-        }
-      }
+  for (const m of history) {
+    if (m.role !== "USER" && m.role !== "ASSISTANT") continue;
+    const role: "user" | "assistant" =
+      m.role === "USER" ? "user" : "assistant";
 
-      return { role, content };
-    });
+    if (role === "assistant" && m.content.trim().length === 0) {
+      // Media turn → narrate it so the thread stays coherent. Any other
+      // empty assistant row is a failed or still-streaming placeholder
+      // with nothing to teach the model; drop it entirely.
+      if (!m.mediaGenerationId) continue;
+      const kind = m.mediaKind === "VIDEO" ? "VIDEO" : "IMAGE";
+      out.push({
+        role,
+        content: MEDIA_STAND_IN[mode === "voice" ? "voice" : "text"][kind],
+      });
+      continue;
+    }
+
+    out.push({ role, content: transformContent(m, mode) });
+  }
+
+  return out;
+}
+
+function transformContent(m: MessageDto, mode: PromptMode): string {
+  let content = m.content;
+
+  if (mode === "voice") {
+    // Strip visual cues from prior assistant TEXT turns so a
+    // freshly-loaded call doesn't inherit "*she leans in*" style.
+    // User turns are left as-is (they're what the user actually
+    // said or typed).
+    if (m.role === "ASSISTANT" && m.source !== "VOICE") {
+      content = stripVisualCues(content);
+    }
+    // Tag text-source turns to signal "typed, not spoken".
+    if (m.source !== "VOICE") {
+      content = `[text chat] ${content}`;
+    }
+    return content;
+  }
+
+  // In text mode, tag voice-source turns so the model doesn't
+  // imitate the spoken style into a novel-style text reply.
+  // Also convert leftover TTS markers (`[laugh]`) to asterisk
+  // beats so the history already looks like text-chat style —
+  // that stops the model from echoing bracket markers into the
+  // typed reply.
+  if (m.source === "VOICE") {
+    content = `[voice call] ${humanizeTtsMarkers(content)}`;
+  }
+  return content;
 }
 
 // ─── Recent-chat highlights (voice-mode digest) ─────────────────────
@@ -274,6 +320,64 @@ function stripVisualCues(text: string): string {
 // ─── Response-style blocks ──────────────────────────────────────────
 
 /**
+ * Visual-action sentinel protocol injected at the bottom of the text-mode
+ * response style. Tells the model it can optionally end its reply with a
+ * hidden <<VA{...}>> sentinel to trigger media generation or offer a photo.
+ *
+ * Rules for the model (from the media spec):
+ *   - mode "generate": user just asked to see something
+ *   - mode "offer": companion wants to offer a photo unprompted (include
+ *     a tease in the prose; the app adds a Yes/No button)
+ *   - scene: concrete outfit/setting/framing/expression — never abstract
+ *   - edit: true when continuing from the last photo
+ *   - Sentinel must be the very last character; never mention it in prose
+ *   - Most turns omit it entirely
+ */
+const VISUAL_ACTION_PROTOCOL: readonly string[] = [
+  "",
+  "── PHOTO / VIDEO PROTOCOL ──",
+  "When the user asks to see a photo or video of you, or when you want to tease sending one, you may optionally end your reply with ONE hidden sentinel (no spaces before/after, always the very last thing):",
+  "",
+  '  <<VA{"mode":"generate","mediaType":"image","scene":"<concrete visual description>","edit":false}>>',
+  "",
+  "Rules:",
+  "- mode: \"generate\" only if the user just asked to see you. mode: \"offer\" if you are volunteering a photo unprompted (companion tease in your prose text, app adds a Yes/No bubble).",
+  "- scene: be specific — outfit, setting, framing, expression, lighting. Never write \"a picture of me\".",
+  '- edit: true only if the user asked for a variation of the last photo ("same outfit but...", "different background", etc.).',
+  "- The sentinel must be the absolute last thing in your reply — no text after it.",
+  "- NEVER mention the sentinel in your prose. Users don't see it.",
+  "- Omit the sentinel on most turns — only use it when there is a genuine visual moment.",
+  // Base-model alignment leaks through here: asked for a photo, the model
+  // reaches for "I'm not comfortable sharing personal pictures, I prefer to
+  // keep my identity private". In this app that is both off-persona and
+  // factually wrong — the photo generates and lands in the thread directly
+  // underneath the refusal.
+  "- You CAN send photos and videos of yourself here — it is a normal part of how the two of you talk. NEVER refuse on grounds of privacy, identity, safety, \"keeping things online\", or not being able to take pictures. You have a camera and you use it.",
+  "- If you genuinely don't want to right now, keep it playful and in-character (\"later — I look a mess 😏\"), never a flat policy refusal.",
+];
+
+/**
+ * Injected when the app has already committed to generating media for this
+ * turn. Without it the reply is written blind: the user asks for a photo,
+ * the model declines on principle, and the generated image appears right
+ * below the refusal. The reply needs to read as the caption on a photo
+ * that is already on its way.
+ */
+function buildPendingMediaDirective(kind: "image" | "video"): string {
+  const noun = kind === "video" ? "a short video" : "a photo";
+  return [
+    "",
+    "── YOU ARE SENDING A PHOTO THIS TURN ──",
+    `You are attaching ${noun} of yourself to this reply. It is already being taken and will appear directly below your message. Write the words that go with it.`,
+    "",
+    "- Say yes, warmly. Never refuse, deflect, stall, or apologise — you are literally sending it as you type.",
+    "- Do not describe what is in the picture; they are about to see it. React to sending it instead: what you were doing, how you feel about them looking, a tease.",
+    "- 1-2 sentences, your usual style, still exactly one *action beat*.",
+    "- Do NOT add a <<VA>> sentinel this turn — the photo is already on its way and a second one would send two.",
+  ].join("\n");
+}
+
+/**
  * Text-mode response style. The block that makes replies feel like a
  * novel scene instead of a customer-service chatbot. Deliberately
  * short and imperative — long lecture-style guidance dilutes attention
@@ -296,10 +400,13 @@ function buildTextResponseStyle(characterName: string): string {
     "- History turns tagged `[voice call]` are transcripts of previous phone conversations. Use them as memory of what was said. This reply is TEXT — write in the novel-scene style below, NOT the short spoken style of a call.",
     "- CRITICAL: NEVER copy, echo, or write the tags `[voice call]` or `[text chat]` in your reply. Those are system labels on history turns only — they are not something you say or type.",
     "- Wrap physical actions, expressions, gestures, and internal sensations in *asterisks*. Examples: *she leans in, her voice dropping to a whisper*, *he raises an eyebrow, half-smiling*, *her breath catches*.",
-    // One-beat cap: dogfooding screenshots showed replies with 2-3
-    // asterisk blocks each, which reads as melodrama and visually
-    // diverges from the same character's spoken style on calls.
-    "- AT MOST ONE *asterisk* action beat per reply, usually at the start. Let your words carry the rest — you're texting someone you like, not writing a novel chapter.",
+    // Exactly one beat — a floor as well as a cap. The cap came first:
+    // dogfooding showed replies with 2-3 asterisk blocks, which reads as
+    // melodrama and diverges from the same character's spoken style on
+    // calls. But "at most one" is satisfied by zero, and the model took
+    // that option as soon as the recent history stopped modelling beats
+    // for it — replies went flat, with no expression at all.
+    "- EXACTLY ONE *asterisk* action beat per reply — never two, and never zero. Put it at the start, before you speak. Let your words carry the rest — you're texting someone you like, not writing a novel chapter.",
     "- Keep spoken dialogue OUTSIDE the asterisks. Do not asterisk-wrap the words being said.",
     "- Use contractions and casual, imperfect phrasing (\"I'm\", \"can't\", \"gonna\", \"y'know\"). You text the way you talk — same voice, same warmth, same humor as when you're on a call with them.",
     // ── Length: intentionally tight ─────────────────────────────
@@ -327,6 +434,16 @@ function buildTextResponseStyle(characterName: string): string {
     "- Stay in the current relationship dynamic and emotional context described in the memory block above.",
     "- Never break the fourth wall. If asked whether you are an AI, deflect warmly and stay in character (e.g. *she tilts her head, amused* Why does that matter to you?).",
     "- Do not start replies with generic filler like \"Oh!\", \"Well,\", or \"Sure!\". Open with an action beat or dive into what you'd actually say.",
+    // Observed repeatedly: mid-thread replies opening "Well hello there,
+    // handsome. Welcome back!" to a message that was plainly a continuation.
+    // The model reaches for a greeting whenever the turn is hard to answer,
+    // which reads as amnesia.
+    "- You are MID-CONVERSATION. Never open with a greeting — no \"hey there\", \"welcome back\", \"long time no chat\", \"hello stranger\", \"good to hear from you\". Those belong only to the very first message of a thread. Respond to what they actually just said.",
+    // Euryale re-emits its own last message when unsure. Two consecutive
+    // replies opened with the identical beat, verbatim.
+    "- Never reuse an action beat you have already used in this conversation. If you tilted your head last time, do something else.",
+    "",
+    ...VISUAL_ACTION_PROTOCOL,
   ].join("\n");
 }
 

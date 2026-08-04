@@ -201,6 +201,15 @@ const envSchema = z.object({
     .default("false")
     .transform((v) => v === "1" || v === "true"),
 
+  // In-chat media generation (images and video via fal.ai).
+  // CHAT_MEDIA_ENABLED controls the server-side pipeline (generation, routes).
+  // NEXT_PUBLIC_CHAT_MEDIA_ENABLED controls whether the client shows the UI.
+  // NEXT_PUBLIC_CHAT_VIDEO_ENABLED is a sub-flag — off until the video path
+  // is fully tested; image generation can be live while video is not.
+  CHAT_MEDIA_ENABLED: boolFromEnv,
+  NEXT_PUBLIC_CHAT_MEDIA_ENABLED: boolFromEnv,
+  NEXT_PUBLIC_CHAT_VIDEO_ENABLED: boolFromEnv,
+
   // Stripe (billing)
   STRIPE_SECRET_KEY: optionalString,
   STRIPE_PUBLISHABLE_KEY: optionalString,
@@ -270,6 +279,18 @@ function assertVoiceConfigIfEnabled(parsed: z.infer<typeof envSchema>): void {
   }
 }
 
+/**
+ * When CHAT_MEDIA_ENABLED is true, FAL_API_KEY must be present.
+ */
+function assertMediaConfigIfEnabled(parsed: z.infer<typeof envSchema>): void {
+  if (!parsed.CHAT_MEDIA_ENABLED) return;
+  if (!parsed.FAL_API_KEY) {
+    throw new Error(
+      `[config/env] CHAT_MEDIA_ENABLED=true but missing: FAL_API_KEY`,
+    );
+  }
+}
+
 function parseEnv(): z.infer<typeof envSchema> {
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
@@ -283,6 +304,7 @@ function parseEnv(): z.infer<typeof envSchema> {
   }
   assertR2ConfigIfEnabled(parsed.data);
   assertVoiceConfigIfEnabled(parsed.data);
+  assertMediaConfigIfEnabled(parsed.data);
   return parsed.data;
 }
 

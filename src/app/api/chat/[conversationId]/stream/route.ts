@@ -21,6 +21,9 @@ import {
   isTransientLlmError,
 } from "@/shared/infrastructure/llm/llm-error-classifier";
 import { env } from "@/config/env";
+import { parseVisualAction } from "@/modules/chat";
+import { classifyIntent } from "@/modules/media/client";
+import { MEDIA_COSTS, OFFER_COOLDOWN_SECONDS } from "@/config/media";
 
 /**
  * SSE streaming route for a single chat turn.
@@ -42,6 +45,13 @@ import { env } from "@/config/env";
 
 const bodySchema = z.object({
   content: z.string().trim().min(1, "Message content is required.").max(4000),
+  /**
+   * The client fires the generation and this stream in parallel, so it tells
+   * us when a photo is already on its way. Without it the model answers a
+   * "send me a pic" blind and often declines — and the image lands in the
+   * thread directly under the refusal.
+   */
+  pendingMedia: z.enum(["image", "video"]).nullish(),
 });
 
 const SSE_HEADERS: HeadersInit = {
@@ -66,7 +76,7 @@ export async function POST(
     return jsonError(401, "You must be signed in to chat.");
   }
 
-  let payload: { content: string };
+  let payload: { content: string; pendingMedia?: "image" | "video" | null };
   try {
     const raw = await request.json();
     const parsed = bodySchema.safeParse(raw);
@@ -105,6 +115,7 @@ export async function POST(
       conversationId,
       latestUserMessage: payload.content,
       actorDisplayName: server.actor.displayName,
+      pendingMedia: payload.pendingMedia ?? null,
     });
   } catch (e) {
     return handleDomainError(e);
@@ -208,12 +219,13 @@ export async function POST(
           send({ type: "text_delta", delta });
         }
 
-        // Scrub before persist + ingest: models occasionally copy the
-        // composer's `[voice call]`/`[text chat]` history annotations
-        // into their own output, and bracketed TTS-style markers have
-        // no place in a text reply. The client applies the same
-        // sanitizer to its buffered copy, so what the user sees now
-        // matches what reloads from the DB later.
+        // Parse the visual-action sentinel BEFORE sanitizing (sanitize strips it).
+        // The sentinel is always at the very end of the raw LLM output.
+        const visualAction = parseVisualAction(streamState.content);
+
+        // Scrub before persist + ingest: strip the sentinel plus modality tags
+        // and TTS markers. The client applies the same sanitizer to its buffered
+        // copy, so what the user sees matches what reloads from the DB later.
         streamState.content = sanitizeAssistantReply(streamState.content);
 
         await appendAssistant.finalize({
@@ -225,6 +237,11 @@ export async function POST(
         });
 
         send({ type: "done", messageId: placeholder.id });
+
+        // Emit visual_action frame if the model signalled one.
+        if (visualAction) {
+          await emitVisualAction(visualAction, payload.content, conversationId, server.redis, send);
+        }
       } catch (e) {
         // Mid-stream failure — we've already committed to a 200 SSE
         // response so we can't switch to a JSON error. Classify, log
@@ -268,6 +285,16 @@ type SsEvent =
       readonly code: string;
       /** Generic short label; the client ignores this in favour of `code`. */
       readonly message: string;
+    }
+  | {
+      /** Companion wants to generate or offer a photo/video. */
+      readonly type: "visual_action";
+      readonly mode: "generate" | "offer";
+      readonly mediaType: "image" | "video";
+      readonly scene: string;
+      readonly edit: boolean;
+      readonly aspect: string | null;
+      readonly cost: number;
     };
 
 function jsonError(status: number, message: string): Response {
@@ -352,4 +379,59 @@ function buildSummarizerTurns(
     { role: "user", content: userContent },
     { role: "assistant", content: assistantContent },
   ];
+}
+
+/**
+ * Emit a visual_action SSE frame from the model's <<VA>> sentinel.
+ *
+ * Downgrade logic: if the model proposes "generate" but the user's message
+ * doesn't have visual intent, downgrade to "offer" so the companion teases
+ * rather than auto-generating unrequested media.
+ *
+ * Offer cadence: Redis NX key prevents more than one companion-initiated
+ * offer per cooldown window per conversation.
+ */
+async function emitVisualAction(
+  visualAction: import("@/modules/chat").VisualActionPayload,
+  userMessage: string,
+  conversationId: string,
+  redis: import("ioredis").default,
+  send: (event: SsEvent) => void,
+): Promise<void> {
+  const userIntent = classifyIntent(userMessage);
+  let mode = visualAction.mode;
+
+  // Downgrade generate → offer when user didn't explicitly ask for media.
+  if (mode === "generate" && userIntent.mediaType === null) {
+    mode = "offer";
+  }
+
+  // Apply offer-cadence cooldown (Redis NX set).
+  if (mode === "offer") {
+    const cooldownKey = `media:offer-cooldown:${conversationId}`;
+    const locked = await redis.set(
+      cooldownKey,
+      "1",
+      "EX",
+      OFFER_COOLDOWN_SECONDS,
+      "NX",
+    );
+    if (!locked) {
+      // Still within cooldown — skip this offer frame silently.
+      return;
+    }
+  }
+
+  const cost =
+    visualAction.mediaType === "video" ? MEDIA_COSTS.VIDEO : MEDIA_COSTS.IMAGE;
+
+  send({
+    type: "visual_action",
+    mode,
+    mediaType: visualAction.mediaType,
+    scene: visualAction.scene,
+    edit: visualAction.edit,
+    aspect: visualAction.aspect ?? null,
+    cost,
+  });
 }

@@ -7,10 +7,17 @@ import type { MemoryFactDraft } from "../../domain/fact";
  */
 export interface MemoryStore {
   /**
-   * Bulk inserts new fact rows. No dedupe here — the extractor is expected
-   * to gate obvious repeats before it hands off. Insertions must be
-   * idempotent-friendly (unique constraint TBD; for v1 we accept duplicates
-   * and let retrieval score them together).
+   * Bulk inserts new fact rows, skipping any the store already holds for
+   * this user + character. The extractor sees one turn at a time and cannot
+   * know what has been said before, so restating something durable is
+   * normal and must not accumulate: retrieval reads only the top
+   * MEMORY_TOP_K facts, and a handful of copies of one fact is enough to
+   * push every other memory out of the prompt.
+   *
+   * A fact is "already held" if its normalized content matches, or — for
+   * IDENTITY facts — if it describes the same `metadata.key` attribute.
+   * Returns the number of rows actually written, which may be fewer than
+   * `drafts.length`.
    *
    * `embeddings` is index-aligned with `drafts`. A `null` entry (or the
    * whole array being omitted) writes NULL into `memory_facts.embedding`

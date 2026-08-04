@@ -41,9 +41,19 @@ import { sanitizeAssistantReply } from "../../domain/sanitize-reply";
  * mid-stream messages from being spliced into the wrong thread.
  */
 
+interface VisualActionEvent {
+  mode: "generate" | "offer";
+  mediaType: "image" | "video";
+  scene: string;
+  edit: boolean;
+  cost: number;
+}
+
 interface UseChatStreamOptions {
   readonly conversationId: string | null;
   readonly initialMessages: readonly ChatMessage[];
+  /** Called when a `visual_action` SSE frame is received. */
+  readonly onVisualAction?: (event: VisualActionEvent) => void;
 }
 
 interface UseChatStreamResult {
@@ -56,7 +66,7 @@ interface UseChatStreamResult {
    * quieter tone) for the reading beat.
    */
   readonly reading: boolean;
-  readonly send: (text: string) => Promise<void>;
+  readonly send: (text: string, opts?: SendOptions) => Promise<void>;
   /**
    * Re-runs the last user message. Removes the failed assistant bubble
    * (so the retry doesn't leave a scar in the transcript) and replays
@@ -64,6 +74,17 @@ interface UseChatStreamResult {
    * Returns silently when there's nothing to retry.
    */
   readonly retry: () => Promise<void>;
+  /**
+   * Inserts the assistant bubble backing a media generation, so the pending
+   * spinner is visible immediately. Needed because `refresh()` deliberately
+   * no-ops mid-stream, which is exactly when generations are triggered.
+   */
+  readonly appendMediaMessage: (args: {
+    messageId: string;
+    mediaGenerationId: string;
+    kind: "IMAGE" | "VIDEO";
+    userMessage?: { id: string; text: string } | null;
+  }) => void;
   /**
    * Fires the character-initiated opener flow. UI shows the typing
    * indicator until the server responds with the composed message.
@@ -93,6 +114,12 @@ interface SendOptions {
    * the reading phase onwards is identical to a fresh send.
    */
   readonly resend?: boolean;
+  /**
+   * Set when the caller is firing a media generation alongside this turn.
+   * The reply then reads as the caption on the photo the user is about to
+   * see instead of an independent answer that might contradict it.
+   */
+  readonly pendingMedia?: "image" | "video" | null;
 }
 
 /**
@@ -115,7 +142,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 interface SseEvent {
-  type: "text_delta" | "done" | "error";
+  type: "text_delta" | "done" | "error" | "visual_action";
   delta?: string;
   messageId?: string;
   /**
@@ -125,11 +152,19 @@ interface SseEvent {
   code?: string;
   /** Kept for backwards compat; new clients ignore this in favour of `code`. */
   message?: string;
+  // visual_action fields
+  mode?: "generate" | "offer";
+  mediaType?: "image" | "video";
+  scene?: string;
+  edit?: boolean;
+  aspect?: string | null;
+  cost?: number;
 }
 
 export function useChatStream({
   conversationId,
   initialMessages,
+  onVisualAction,
 }: UseChatStreamOptions): UseChatStreamResult {
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     ...initialMessages,
@@ -150,6 +185,12 @@ export function useChatStream({
   // sticky-failing providers could burn through the manual-retry
   // affordance behind the user's back).
   const autoRetriedRef = useRef(false);
+
+  // Live mirror of "a turn is in flight". The `streaming`/`reading` state
+  // drives rendering, but any callback captured before a turn started reads
+  // them as false — which let the auto-opener fire on top of a message the
+  // user had just sent. A ref reads current, so the guard actually holds.
+  const turnInFlightRef = useRef(false);
 
   // "Adjusting state on prop change" pattern — reset the thread when the
   // conversation id changes, without a useEffect (avoids the setState-in-
@@ -193,6 +234,7 @@ export function useChatStream({
       // controls which indicator the UI paints; streaming controls the
       // composer's disabled state so a second Enter during the pause
       // can't queue a duplicate request.
+      turnInFlightRef.current = true;
       setStreaming(true);
       setReading(true);
       setLastError(null);
@@ -257,7 +299,10 @@ export function useChatStream({
         const res = await fetch(`/api/chat/${conversationId}/stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: trimmed }),
+          body: JSON.stringify({
+            content: trimmed,
+            pendingMedia: opts.pendingMedia ?? null,
+          }),
         });
 
         if (!res.ok || !res.body) {
@@ -299,6 +344,22 @@ export function useChatStream({
               accumulated += evt.delta;
             } else if (evt.type === "done" && typeof evt.messageId === "string") {
               finalMessageId = evt.messageId;
+            } else if (evt.type === "visual_action") {
+              // Companion triggered a media action. Route to the caller.
+              if (
+                onVisualAction &&
+                evt.mode &&
+                evt.mediaType &&
+                evt.scene !== undefined
+              ) {
+                onVisualAction({
+                  mode: evt.mode,
+                  mediaType: evt.mediaType,
+                  scene: evt.scene ?? "",
+                  edit: evt.edit ?? false,
+                  cost: evt.cost ?? 10,
+                });
+              }
             } else if (evt.type === "error") {
               // Server sends a stable `code` — never the raw provider
               // message. We stash the code on the bubble so the
@@ -351,6 +412,7 @@ export function useChatStream({
         setLastError(raw);
         maybeScheduleAutoRetry("NETWORK");
       } finally {
+        turnInFlightRef.current = false;
         setStreaming(false);
         // Defense-in-depth: if `reading` somehow survived (e.g. an
         // error was thrown while the sleep was in flight — currently
@@ -382,11 +444,13 @@ export function useChatStream({
         }
       }
     },
+    // onVisualAction is guaranteed stable (useCallback-wrapped at the call site).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [conversationId],
   );
 
   const send = useCallback(
-    (text: string) => runSend(text),
+    (text: string, opts: SendOptions = {}) => runSend(text, opts),
     [runSend],
   );
 
@@ -409,15 +473,19 @@ export function useChatStream({
   }, [conversationId, streaming, runSend]);
 
   const initiateOpener = useCallback(async (): Promise<boolean> => {
-    // Refuse if there's no thread yet or a turn is already in-flight.
-    // The caller (ChatConversation) is also gated on these flags, but
-    // this defensive check makes the hook safe to call from anywhere.
-    if (!conversationId || streaming || reading) return false;
+    // Refuse if there's no thread yet or a turn is already in-flight. The
+    // ref is the load-bearing half: this callback is fired from a timer whose
+    // captured `streaming`/`reading` are always false, so those alone would
+    // wave through an opener that lands on the user's own message.
+    if (!conversationId || turnInFlightRef.current || streaming || reading) {
+      return false;
+    }
 
     // Insert an empty streaming assistant bubble to drive the typing
     // indicator. Same visual as a normal turn: dots stay until we
     // splice in the finished text.
     const assistantTempId = `temp-opener-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    turnInFlightRef.current = true;
     setStreaming(true);
     setLastError(null);
     setMessages((prev) => [
@@ -488,6 +556,7 @@ export function useChatStream({
       setLastError(e instanceof Error ? e.message : "network");
       return false;
     } finally {
+      turnInFlightRef.current = false;
       setStreaming(false);
     }
   }, [conversationId, streaming, reading]);
@@ -512,6 +581,53 @@ export function useChatStream({
     }
   }, [conversationId, streaming, reading]);
 
+  /**
+   * Append the assistant bubble that backs a media generation.
+   *
+   * `refresh()` can't do this job: it refuses to run while a stream is in
+   * flight (correctly — the SSE loop owns the tail), and both generation
+   * triggers fire mid-stream. The classifier fires the moment the user hits
+   * Send, and the <<VA>> sentinel arrives inside the stream body. So the row
+   * is inserted locally instead; the server already persisted the identical
+   * message, and the ids match, so the next natural refetch is a no-op rather
+   * than a duplicate.
+   */
+  const appendMediaMessage = useCallback(
+    (args: {
+      messageId: string;
+      mediaGenerationId: string;
+      kind: "IMAGE" | "VIDEO";
+      /** Present when the prompt bypassed the chat stream (mode pill). */
+      userMessage?: { id: string; text: string } | null;
+    }): void => {
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === args.messageId)) return prev;
+        const now = new Date();
+        const rows: ChatMessage[] = [];
+        if (args.userMessage && !prev.some((m) => m.id === args.userMessage!.id)) {
+          rows.push({
+            id: args.userMessage.id,
+            role: "user" as const,
+            text: args.userMessage.text,
+            at: now,
+          });
+        }
+        rows.push({
+          id: args.messageId,
+          role: "assistant" as const,
+          text: "",
+          at: new Date(now.getTime() + 1),
+          mediaGenerationId: args.mediaGenerationId,
+          mediaKind: args.kind,
+          mediaStatus: "PENDING" as const,
+          mediaUrl: null,
+        });
+        return [...prev, ...rows];
+      });
+    },
+    [],
+  );
+
   return {
     messages,
     streaming,
@@ -520,6 +636,7 @@ export function useChatStream({
     retry,
     initiateOpener,
     refresh,
+    appendMediaMessage,
     lastError,
   };
 }

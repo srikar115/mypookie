@@ -5,6 +5,8 @@
  * text that hasn't been finalized server-side yet.
  */
 
+import { stripVisualActionSentinel } from "./visual-action";
+
 /**
  * The prompt composer annotates cross-modality history turns with
  * `[voice call]` / `[text chat]` prefixes so the model can tell spoken
@@ -81,8 +83,11 @@ export function humanizeTtsMarkers(text: string): string {
 
 /**
  * Full clean for an assistant reply headed to the chat transcript:
- * modality tags out, TTS markers converted to beats, whitespace tidied.
+ * modality tags out, TTS markers converted to beats, whitespace tidied,
+ * and the visual-action sentinel stripped so it never reaches the UI, TTS,
+ * or the DB content column.
  */
 export function sanitizeAssistantReply(text: string): string {
-  return humanizeTtsMarkers(stripModalityTags(text));
+  // Strip the <<VA{...}>> sentinel first so downstream regexes don't see it.
+  return humanizeTtsMarkers(stripModalityTags(stripVisualActionSentinel(text)));
 }

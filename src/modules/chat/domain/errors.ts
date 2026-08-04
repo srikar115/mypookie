@@ -19,6 +19,18 @@ export class ConversationAccessDeniedError extends Error {
   }
 }
 
+/**
+ * The character was asked to speak first at a moment when it shouldn't.
+ * Not a failure — the caller turns this into a silent "no opener this
+ * time", which is the correct outcome. See `domain/opener-policy.ts`.
+ */
+export class OpenerNotWarrantedError extends Error {
+  constructor(readonly reason: string) {
+    super(`Opener not warranted (${reason}).`);
+    this.name = "OpenerNotWarrantedError";
+  }
+}
+
 export class ChatCharacterUnavailableError extends Error {
   constructor(characterId: string) {
     super(
