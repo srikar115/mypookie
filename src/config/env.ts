@@ -47,7 +47,17 @@ const envSchema = z.object({
   DATABASE_URL: requiredUrl("DATABASE_URL"),
   DIRECT_URL: requiredUrl("DIRECT_URL"),
 
-  // NextAuth
+  // NextAuth v5. AUTH_URL / AUTH_SECRET / AUTH_TRUST_HOST are the canonical
+  // v5 names read by next-auth itself; NEXTAUTH_* are kept for backwards
+  // compat with legacy code paths but v5 silently ignores NEXTAUTH_URL.
+  //
+  // AUTH_TRUST_HOST=true is REQUIRED in prod (`next start`) — without it,
+  // v5 refuses every request with an UntrustedHost error whenever AUTH_URL
+  // doesn't exactly match the incoming Host header (breaks ngrok, LAN IPs,
+  // and every reverse-proxied deploy).
+  AUTH_SECRET: optionalString,
+  AUTH_URL: optionalString,
+  AUTH_TRUST_HOST: boolFromEnv,
   NEXTAUTH_SECRET: requiredString("NEXTAUTH_SECRET"),
   NEXTAUTH_URL: optionalString,
 
