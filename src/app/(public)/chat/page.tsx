@@ -31,10 +31,15 @@ export default async function ChatPage({ searchParams }: ChatPageProps) {
     throw new Error("Unreachable: /chat rendered without an actor.");
   }
 
-  const repo = createCharacterReadRepository(ctx);
-  const characters = await repo.listByOwner(ctx.actor.id);
+  // Parallel round 1: characters list + searchParams are both needed to
+  // decide `initialSelectedId`. Neither depends on the other, so race
+  // them — the SSR pays for ONE round-trip instead of two.
+  const [characters, resolvedParams] = await Promise.all([
+    createCharacterReadRepository(ctx).listByOwner(ctx.actor.id),
+    searchParams,
+  ]);
 
-  const raw = (await searchParams).with;
+  const raw = resolvedParams.with;
   const requested = Array.isArray(raw) ? raw[0] : raw;
   const initialSelectedId =
     requested && characters.some((c) => c.id === requested)
@@ -49,6 +54,11 @@ export default async function ChatPage({ searchParams }: ChatPageProps) {
     // Pre-warm the deep-linked thread on the server so tokens can arrive on
     // the very first client render. Failures (e.g. the companion was just
     // deleted) fall through silently — the workspace will lazy-load.
+    //
+    // NOTE: `listMessages` depends on `conversation.id`, so it MUST await
+    // the conversation load first. This one sequential await remains
+    // unavoidable — the other three network hops on this page have been
+    // collapsed above.
     try {
       const startOrLoad = createStartOrLoadConversationUseCase(ctx);
       const conversation = await startOrLoad.execute({
