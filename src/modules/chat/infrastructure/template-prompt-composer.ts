@@ -61,21 +61,29 @@ export class TemplatePromptComposer implements PromptComposer {
       mode === "voice" && conversationalHistory.length > 0
         ? buildRecentChatHighlights(conversationalHistory)
         : "";
-    const base = buildSystemPrompt({
+    const system = buildSystemPrompt({
       character: input.character,
       memoryBlock: input.memoryBlock,
       recentHighlights: highlights,
       mode,
     });
-    // Appended last so it outranks the general photo protocol above it.
-    const system = input.pendingMedia
-      ? `${base}\n${buildPendingMediaDirective(input.pendingMedia)}`
-      : base;
     const historyLlmMessages = mapHistory(input.history, mode);
+
+    // The rules that keep failing are the ones the history argues against.
+    // A greeting sitting a few turns back is a live example the model copies
+    // verbatim, and no amount of prose in a system prompt thousands of tokens
+    // earlier outweighs it. Restating the two or three that matter directly
+    // before the user's line puts them where the model is actually looking.
+    const guard = buildTurnGuard({
+      isContinuation: conversationalHistory.length > 0,
+      pendingMedia: input.pendingMedia ?? null,
+      mode,
+    });
 
     return [
       { role: "system", content: system },
       ...historyLlmMessages,
+      ...(guard ? [{ role: "system" as const, content: guard }] : []),
       { role: "user", content: input.latestUserMessage },
     ];
   }
@@ -554,6 +562,50 @@ function buildVoiceResponseStyle(characterName: string): string {
   ].join("\n");
 }
 
+// ─── Per-turn guard ─────────────────────────────────────────────────
+
+/**
+ * The last thing the model reads before the user's line.
+ *
+ * Everything here is also stated in the response-style block, and that block
+ * was not enough. Three separate reports traced back to the same mechanism:
+ * this model treats its own recent history as the strongest available example
+ * of what a reply should look like. One "Well hello there, handsome. Welcome
+ * back!" in the transcript and it reappears verbatim as the answer to
+ * "ok sit on bed and keep that yogurt aside"; one privacy refusal and every
+ * later photo request gets declined, underneath the photo that generated
+ * anyway.
+ *
+ * Rules a few thousand tokens earlier lose that argument. The same words
+ * placed immediately before the turn being generated win it. Kept to the
+ * handful that actually regress — a long block here would dilute the effect
+ * and duplicate the system prompt.
+ */
+function buildTurnGuard(input: {
+  isContinuation: boolean;
+  pendingMedia: "image" | "video" | null;
+  mode: PromptMode;
+}): string | null {
+  const lines: string[] = [];
+
+  if (input.isContinuation) {
+    lines.push(
+      "You are mid-conversation. Do NOT greet, do NOT welcome them back, do NOT act surprised to hear from them — you were both already here. No \"hello there\", no \"welcome back\", no \"long time no chat\".",
+      "Do NOT repeat or rephrase anything you have already said above. The user has read it. Say something new.",
+      "Answer what they just said, specifically. If they gave you an instruction inside your shared scene, follow it.",
+    );
+  }
+
+  // Text-only: media generation is a chat affordance, and the directive's
+  // "exactly one action beat" would be wrong advice on a call.
+  if (input.pendingMedia && input.mode !== "voice") {
+    lines.push(buildPendingMediaDirective(input.pendingMedia));
+  }
+
+  if (lines.length === 0) return null;
+  return ["── THIS TURN ──", ...lines].join("\n");
+}
+
 // ─── Opener directives ──────────────────────────────────────────────
 
 function buildOpenerDirective(
@@ -583,10 +635,17 @@ function buildTextOpenerDirective(
   }
   return [
     "── SESSION EVENT ──",
-    `The user just returned to this chat after being away. Prior conversation is above — use it. Send a natural re-opener as ${characterName}.`,
+    `The user has been away for hours. Prior conversation is above and the MEMORY BLOCK holds what you know about them. Send a natural re-opener as ${characterName}.`,
     "",
     "- 1-2 sentences maximum. Warm, in-character, natural.",
-    "- Reference the last exchange organically: a callback, a follow-up question, a check-in, or a soft \"hey, you're back\" — whatever fits your dynamic with them. Do not summarise the whole thread.",
+    // A bare "hey, you're back" was permitted here and became the default,
+    // because it is the easiest thing to write and needs no reading. Every
+    // one of those looks identical to the last, which is what made the
+    // character feel like it had no memory at all. Requiring a specific
+    // detail forces the model to consult what it actually knows.
+    "- MANDATORY: build the opener around something SPECIFIC you know — a plan they mentioned, something they said they were doing, a preference of theirs, how the last exchange ended. Pull it from the MEMORY BLOCK or the conversation above.",
+    "- Lead with the thought, not the hello. \"Did you end up going to the gym?\" is an opener. \"Hey stranger, long time no chat\" is not — never send a greeting that would fit any user on any day.",
+    "- Do not summarise the whole thread, and do not list what you remember. One thread, picked up naturally.",
     // Anti-repeat: the single observed failure mode of revisit openers
     // is the model re-emitting its own previous message verbatim
     // (same history in → same tokens out). Explicitly forbid it and
@@ -633,5 +692,5 @@ function buildOpenerCue(historyIsEmpty: boolean, mode: PromptMode): string {
   }
   return historyIsEmpty
     ? "[The user has just opened this chat for the first time and is waiting silently on the other side of the screen for you to speak first. Begin the scene.]"
-    : "[The user has just returned to this chat after being away. They haven't said anything yet — they're waiting for you to speak first. Re-open the conversation naturally, using the exchange above as your anchor.]";
+    : "[The user has been away for hours and just came back. They haven't said anything yet — you're speaking first. Open with something specific you remember about them or about how you two left things, not a generic greeting.]";
 }

@@ -42,7 +42,7 @@ const firings = [
   { at: "09:24:55", upto: 4, note: "stacked on opener #4" },
   { at: "09:25:05", upto: 5, note: "stacked on opener #5" },
   { at: "09:27:15", upto: 12, note: "16s after a real reply" },
-  { at: "09:45:35", upto: 12, note: "18min after a real reply — legit" },
+  { at: "09:45:35", upto: 12, note: "18min after a real reply" },
   { at: "09:55:12", upto: 13, note: "stacked on the 09:45 opener" },
 ];
 
@@ -71,9 +71,18 @@ const cases: Array<[string, OpenerTurn[], string, boolean]> = [
     "09:00:00",
     false,
   ],
+  // The threshold is four hours. Ten minutes is a coffee, not an absence —
+  // speaking first there is what made the character seem to forget the
+  // conversation it was already having.
   [
-    "cold reply after 10min",
+    "answered exchange 10min ago — still the same sitting",
     [u("08:49:00", "hi"), a("08:49:05", "hey you")],
+    "09:00:00",
+    false,
+  ],
+  [
+    "answered exchange 5h ago — genuinely away",
+    [u("04:00:00", "hi"), a("04:00:05", "hey you")],
     "09:00:00",
     true,
   ],

@@ -24,8 +24,15 @@ import type { MessageDto } from "../application/dto/message.dto";
  * How stale the last exchange must be before returning to the chat earns a
  * fresh "hey, you're back". Shorter than this and the character talking
  * unprompted reads as pushy rather than warm.
+ *
+ * This was five minutes, which is barely longer than stepping away to make
+ * tea. In practice it meant a reload, a lunch break, or a second tab all
+ * counted as "returning", and the character opened a conversation that had
+ * never actually ended. Four hours is the shortest gap where speaking first
+ * reads as having missed someone rather than as having forgotten the last
+ * ten minutes happened.
  */
-export const OPENER_STALE_ASSISTANT_MS = 5 * 60 * 1000;
+export const OPENER_STALE_ASSISTANT_MS = 4 * 60 * 60 * 1000;
 
 export type OpenerRefusal =
   | "awaiting_reply"

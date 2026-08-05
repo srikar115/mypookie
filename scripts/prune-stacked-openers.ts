@@ -8,8 +8,12 @@
  *
  * This removes the damage so the model sees a clean thread again:
  *   - stacked openers: assistant turns with no user turn before them
- *   - recycled greetings: assistant turns whose text is repeated verbatim
- *     elsewhere in the thread (the tell-tale sign of the greeting loop)
+ *   - recycled greetings: assistant turns repeating text sent earlier in the
+ *     thread verbatim (the tell-tale sign of the greeting loop); the first
+ *     copy is kept, later ones go
+ *   - contradicted refusals: a "I'd rather not share photos" reply sitting
+ *     directly above the photo that was generated anyway. Left in place the
+ *     model reads it as precedent and refuses every later request too.
  *
  * The conversation's first message is always kept — that opener is
  * legitimate. User messages and media are never touched.
@@ -44,6 +48,15 @@ function norm(s: string): string {
 }
 
 async function main() {
+  if (process.argv.includes("--all")) {
+    const all = await prisma.conversation.findMany({
+      orderBy: { lastMessageAt: "desc" },
+      select: { id: true },
+    });
+    for (const c of all) await prune(c.id);
+    return;
+  }
+
   const conversationId =
     convArg?.split("=")[1] ??
     (
@@ -53,7 +66,10 @@ async function main() {
       })
     )?.id;
   if (!conversationId) return console.log("no conversation found");
+  await prune(conversationId);
+}
 
+async function prune(conversationId: string) {
   const rows = await prisma.message.findMany({
     where: { conversationId },
     orderBy: { createdAt: "asc" },
@@ -73,11 +89,15 @@ async function main() {
   const assistantText = turns.filter(
     (r) => r.role === "ASSISTANT" && r.content.trim().length > 0,
   );
-  const counts = new Map<string, number>();
+  // First time each line was said — anything later is a repeat.
+  const firstSeen = new Map<string, string>();
   for (const r of assistantText) {
     const k = norm(r.content);
-    counts.set(k, (counts.get(k) ?? 0) + 1);
+    if (!firstSeen.has(k)) firstSeen.set(k, r.id);
   }
+
+  const REFUSAL =
+    /\b(prefer to keep|rather not|not comfortable|won'?t be sharing|can'?t (share|send)|keep (things|it) (a bit )?(private|mysterious)|leave (something|a little) to the imagination)\b/i;
 
   const doomed: Array<{ id: string; why: string; at: Date; text: string }> = [];
   for (let i = 0; i < turns.length; i++) {
@@ -87,17 +107,33 @@ async function main() {
     if (i === 0) continue; // the legitimate first-ever opener
 
     const prev = turns[i - 1];
+    const next = turns[i + 1];
     const stacked = prev.role !== "USER";
-    const recycled = (counts.get(norm(r.content)) ?? 0) > 1;
-    if (!stacked && !recycled) continue;
+    const recycled = firstSeen.get(norm(r.content)) !== r.id;
+    // A refusal is only damage when the photo showed up regardless.
+    const contradicted =
+      REFUSAL.test(r.content) &&
+      next?.role === "ASSISTANT" &&
+      next.mediaGenerationId !== null;
+
+    const why = [
+      stacked && "stacked",
+      recycled && "recycled",
+      contradicted && "contradicted",
+    ]
+      .filter(Boolean)
+      .join("+");
+    if (!why) continue;
 
     doomed.push({
       id: r.id,
-      why: stacked && recycled ? "stacked+recycled" : stacked ? "stacked" : "recycled",
+      why,
       at: r.createdAt,
       text: r.content.replace(/\s+/g, " ").slice(0, 64),
     });
   }
+
+  if (doomed.length === 0) return console.log("clean.\n");
 
   console.log(`${doomed.length} assistant greetings to remove:\n`);
   for (const d of doomed) {
