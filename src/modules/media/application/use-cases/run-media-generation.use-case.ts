@@ -5,8 +5,12 @@ import type { ReferenceImageResolver } from "../ports/reference-image-resolver";
 import type { MediaModelResolver } from "../ports/media-model-resolver";
 import type { CreditGateway } from "../ports/credit-gateway";
 import type { CompanionVisualProfileReader } from "../ports/companion-visual-profile-reader";
+import type { RecentConversationReader } from "../ports/recent-conversation-reader";
+import type { VisualSceneGrounder } from "../ports/visual-scene-grounder";
+import type { GeneratedMediaRecorder } from "../ports/generated-media-recorder";
 import type { RunMediaInput } from "../dto/media-generation.dto";
 import { MediaGenerationNotFoundError, MediaGenerationAccessDeniedError } from "../../domain/media-generation";
+import { isVagueScene, SCENE_CONTEXT_TURNS } from "../../domain/scene";
 import {
   resolveImageModelSlug,
   resolveModelFamilySlug,
@@ -25,11 +29,12 @@ import type { CompanionVisualProfile } from "../ports/companion-visual-profile-r
  *   3. Resolve model slug (user pref → admin default → fallback)
  *   4. Resolve reference image (composer pick → last chat image → avatar)
  *   5. Sibling-swap: edit model + no reference → text-to-image sibling
- *   6. Build companion-consistent prompt
- *   7. Call fal.ai queue (submit → poll → fetch result)
- *   8. Upload result to R2
- *   9. Transition to COMPLETED + debit credits
- *  10. On failure: transition to FAILED + refund (reservation pattern)
+ *   6. Ground a contentless scene in the conversation ("share your pic")
+ *   7. Build companion-consistent prompt
+ *   8. Call fal.ai queue (submit → poll → fetch result)
+ *   9. Upload result to R2
+ *  10. Transition to COMPLETED + debit credits
+ *  11. On failure: transition to FAILED + refund (reservation pattern)
  *
  * This use case is called by POST /api/media/run (fire-and-wait, keepalive).
  */
@@ -42,6 +47,9 @@ export class RunMediaGenerationUseCase {
     private readonly credits: CreditGateway,
     private readonly visualProfile: CompanionVisualProfileReader,
     private readonly promptBuilder: CompanionVisualPromptBuilder,
+    private readonly conversation: RecentConversationReader,
+    private readonly sceneGrounder: VisualSceneGrounder,
+    private readonly recorder: GeneratedMediaRecorder,
   ) {}
 
   async execute(input: RunMediaInput): Promise<void> {
@@ -97,9 +105,17 @@ export class RunMediaGenerationUseCase {
       // Load companion visual profile for prompt enrichment.
       const profile = await this.visualProfile.read(gen.characterId);
 
+      const scene = await this.resolveScene({
+        requested: gen.prompt,
+        promptIsFinal: meta.promptIsFinal ?? false,
+        conversationId: gen.conversationId,
+        characterName: profile?.name ?? "her",
+        kind: gen.kind,
+      });
+
       // Build final prompt. `promptIsFinal` requests are sent as written.
       const finalPrompt = this.promptBuilder.build({
-        userScene: gen.prompt,
+        userScene: scene,
         profile,
         style: meta.style ?? null,
         hasReference,
@@ -139,6 +155,25 @@ export class RunMediaGenerationUseCase {
         },
         completedAt: new Date(),
       });
+
+      // Remember the photo. Deliberately after the row is COMPLETED and
+      // deliberately swallowing its own errors: the asset exists, the user has
+      // been charged, and the bubble is about to render. A memory write
+      // failing is not a reason to fail the generation or refund it.
+      try {
+        await this.recorder.record({
+          userId: gen.userId,
+          characterId: gen.characterId,
+          characterName: profile?.name ?? "She",
+          conversationId: gen.conversationId,
+          mediaGenerationId: gen.id,
+          kind: gen.kind,
+          scene,
+          offStreamRequest: meta.offStreamRequest ?? null,
+        });
+      } catch (e) {
+        console.warn("[media] recording generation to memory failed", e);
+      }
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e);
       // Transition to FAILED.
@@ -157,6 +192,42 @@ export class RunMediaGenerationUseCase {
 
       throw e;
     }
+  }
+
+  /**
+   * "share your pic" names nothing to photograph. Sent through as-is it
+   * yields a generic portrait that ignores the conversation it came out of —
+   * she says she's eating an apple, the user asks for a picture, and the
+   * photo shows her posing against a wall.
+   *
+   * Only contentless requests are rewritten. A scene the user described, or
+   * one the chat model already specified in its `<<VA>>` sentinel, is left
+   * exactly as it is: those callers know more than this does. `promptIsFinal`
+   * requests (mode pill, composer) are never touched at all — the user read
+   * that text and pressed Generate on it.
+   */
+  private async resolveScene(input: {
+    requested: string;
+    promptIsFinal: boolean;
+    conversationId: string;
+    characterName: string;
+    kind: "IMAGE" | "VIDEO";
+  }): Promise<string> {
+    if (input.promptIsFinal) return input.requested;
+    if (!isVagueScene(input.requested)) return input.requested;
+
+    const recentTurns = await this.conversation.listRecentTurns(
+      input.conversationId,
+      SCENE_CONTEXT_TURNS,
+    );
+    const grounded = await this.sceneGrounder.ground({
+      userRequest: input.requested,
+      characterName: input.characterName,
+      recentTurns,
+      kind: input.kind,
+    });
+
+    return grounded ?? input.requested;
   }
 }
 

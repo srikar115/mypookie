@@ -70,6 +70,7 @@ export class StartMediaGenerationUseCase {
             modelFamilyId: input.modelFamilyId,
             resolution: input.resolution,
             duration: input.duration,
+            offStreamRequest: input.userPromptText ?? null,
           },
           createdAt: now,
           updatedAt: now,

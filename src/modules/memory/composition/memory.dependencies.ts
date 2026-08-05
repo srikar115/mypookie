@@ -19,6 +19,7 @@ import { CachedMemoryContextProvider } from "../infrastructure/cached-memory-con
 import type { Embedder } from "../application/ports/embedder";
 import { AssembleContextUseCase } from "../application/use-cases/assemble-context.use-case";
 import { IngestTurnUseCase } from "../application/use-cases/ingest-turn.use-case";
+import { RecordFactsUseCase } from "../application/use-cases/record-facts.use-case";
 
 /**
  * Composition factories for the memory module. Wires the concrete Prisma /
@@ -89,6 +90,21 @@ export function createAssembleContextUseCase(
     new PrismaRelationshipStore(ctx.db),
   );
   return new CachedMemoryContextProvider(inner, ctx.redis);
+}
+
+/**
+ * For callers that already know the fact — see {@link RecordFactsUseCase}.
+ * No extractor or summarizer is wired, so this costs one embedding call
+ * rather than an LLM completion.
+ */
+export function createRecordFactsUseCase(
+  ctx: ServerContext,
+): RecordFactsUseCase {
+  return new RecordFactsUseCase(
+    new PrismaMemoryStore(ctx.db),
+    ctx.clock,
+    createEmbedder(ctx),
+  );
 }
 
 export function createIngestTurnUseCase(ctx: ServerContext): IngestTurnUseCase {

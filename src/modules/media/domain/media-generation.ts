@@ -28,6 +28,14 @@ export interface MediaGenerationMetadata {
   /** Video only. */
   resolution?: string | null;
   duration?: number | null;
+  /**
+   * The user's own words, recorded only when the request never passed through
+   * the chat stream — the mode pill and the Edit button on a finished photo.
+   * Those paths create their messages directly, so nothing else ingests the
+   * turn into memory or advances the relationship counters. Null (or absent)
+   * means the stream already handled it and re-ingesting would double-count.
+   */
+  offStreamRequest?: string | null;
 }
 
 /** Domain errors */

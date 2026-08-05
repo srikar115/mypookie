@@ -1,6 +1,15 @@
 import "server-only";
 import type { ServerContext } from "@/composition/server-context";
+import type { ChatLlm } from "@/shared/application/llm/chat-llm";
+import { OpenRouterChatLlm } from "@/shared/infrastructure/llm/openrouter-chat-llm";
 import { PrismaMediaGenerationRepository } from "../infrastructure/prisma-media-generation.repository";
+import {
+  createIngestTurnUseCase,
+  createRecordFactsUseCase,
+} from "@/modules/memory";
+import { PrismaRecentConversationReader } from "../infrastructure/prisma-recent-conversation.reader";
+import { LlmVisualSceneGrounder } from "../infrastructure/prompt/llm-visual-scene.grounder";
+import { MemoryGeneratedMediaRecorder } from "../infrastructure/memory-generated-media.recorder";
 import { PrismaReferenceImageResolver } from "../infrastructure/prisma-reference-image.resolver";
 import { PrismaMediaModelResolver } from "../infrastructure/prisma-media-model.resolver";
 import { PrismaCompanionVisualProfileReader } from "../infrastructure/prisma-companion-visual-profile.reader";
@@ -14,6 +23,15 @@ import { GetMediaStatusUseCase } from "../application/use-cases/get-media-status
 import { ListRecentMediaUseCase } from "../application/use-cases/list-recent-media.use-case";
 
 // ─── Factory helpers ──────────────────────────────────────────────────────────
+
+// One HTTP client for the scene grounder, reused across requests. Module-local
+// rather than on ServerContext so its lifecycle mirrors media's, matching how
+// the memory module holds its own.
+let sharedChatLlm: ChatLlm | null = null;
+function getChatLlm(): ChatLlm {
+  if (!sharedChatLlm) sharedChatLlm = new OpenRouterChatLlm();
+  return sharedChatLlm;
+}
 
 export function createStartMediaGenerationUseCase(ctx: ServerContext) {
   const repo = new PrismaMediaGenerationRepository(ctx.db);
@@ -39,6 +57,14 @@ export function createRunMediaGenerationUseCase(ctx: ServerContext) {
     credits,
     visualProfile,
     promptBuilder,
+    new PrismaRecentConversationReader(ctx.db),
+    new LlmVisualSceneGrounder(getChatLlm(), ctx.models),
+    new MemoryGeneratedMediaRecorder(
+      createRecordFactsUseCase(ctx),
+      createIngestTurnUseCase(ctx),
+      ctx.db,
+      ctx.clock,
+    ),
   );
 }
 
@@ -47,6 +73,8 @@ export function createPreviewMediaPromptUseCase(ctx: ServerContext) {
     new PrismaReferenceImageResolver(ctx.db),
     new PrismaCompanionVisualProfileReader(ctx.db),
     new CompanionVisualPromptBuilderImpl(),
+    new PrismaRecentConversationReader(ctx.db),
+    new LlmVisualSceneGrounder(getChatLlm(), ctx.models),
     ctx.db,
   );
 }

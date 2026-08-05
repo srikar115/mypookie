@@ -4,13 +4,15 @@
  * server-driven).
  */
 
-export type { MemoryFact, MemoryFactDraft } from "./domain/fact";
+export type { MemoryFact, MemoryFactDraft, MemoryCategory } from "./domain/fact";
 export type { SummarizerTurn } from "./application/ports/session-summarizer";
 
 export { AssembleContextUseCase } from "./application/use-cases/assemble-context.use-case";
 export { IngestTurnUseCase } from "./application/use-cases/ingest-turn.use-case";
+export { RecordFactsUseCase } from "./application/use-cases/record-facts.use-case";
 
 export {
   createAssembleContextUseCase,
   createIngestTurnUseCase,
+  createRecordFactsUseCase,
 } from "./composition/memory.dependencies";
