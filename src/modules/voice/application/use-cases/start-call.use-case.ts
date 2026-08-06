@@ -28,6 +28,14 @@ export interface StartCallResult {
 }
 
 /**
+ * How long an open call may go without any sign of life before we treat it
+ * as abandoned. The client's credit ticker touches the row every 12 seconds,
+ * so anything past a couple of minutes is a session whose owner is gone.
+ * Generous enough to survive a long network flap on a genuinely live call.
+ */
+const CALL_SILENCE_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
  * StartCall — issues a LiveKit access token AND writes the CallSession
  * row that anchors the whole call lifecycle.
  *
@@ -76,6 +84,17 @@ export class StartCallUseCase {
     }
 
     const now = this.clock.now();
+
+    // Clear out calls nobody is on before deciding whether one is in
+    // progress. Without this a single missed hang-up — a killed tab, a
+    // LiveKit instance that can't reach our webhook — permanently bricks
+    // calling for that user, and the orphan row is also billed as an
+    // unbroken call against their daily minutes.
+    await this.callSessions.reapAbandonedByUser({
+      userId: input.actorUserId,
+      silentSince: new Date(now.getTime() - CALL_SILENCE_TIMEOUT_MS),
+      now,
+    });
 
     const active = await this.callSessions.findActiveByUser(input.actorUserId);
     if (active) throw new ConcurrentCallLimitError(input.actorUserId);

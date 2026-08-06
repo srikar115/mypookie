@@ -69,21 +69,34 @@ export class TemplatePromptComposer implements PromptComposer {
     });
     const historyLlmMessages = mapHistory(input.history, mode);
 
-    // The rules that keep failing are the ones the history argues against.
-    // A greeting sitting a few turns back is a live example the model copies
-    // verbatim, and no amount of prose in a system prompt thousands of tokens
-    // earlier outweighs it. Restating the two or three that matter directly
-    // before the user's line puts them where the model is actually looking.
+    // Rules the recent history argues against — don't greet, don't repeat
+    // yourself, don't step out of character — restated compactly at the end
+    // of the system prompt, where they're the last instruction the model
+    // reads before the conversation itself.
     const guard = buildTurnGuard({
+      characterName: input.character.name,
       isContinuation: conversationalHistory.length > 0,
       pendingMedia: input.pendingMedia ?? null,
       mode,
     });
 
+    // EXACTLY ONE system message, always, at position 0.
+    //
+    // The guard originally shipped as a second system message placed between
+    // the history and the user's turn, to buy recency over a history full of
+    // counter-examples. It leaked: asked "lets have a call", the model
+    // replied with the verbatim text of the guard followed by the response
+    // style block. Llama-derived chat templates (Euryale among them) encode a
+    // single leading system turn; a later one renders as an unfamiliar block
+    // mid-conversation and a completion-trained model does the obvious thing
+    // with unfamiliar text — it continues it.
+    //
+    // The voice agent independently requires this shape: it uses
+    // `messages.find(role === "system")` as the session instructions and
+    // discards the rest, so a trailing guard was dropped outright on calls.
     return [
-      { role: "system", content: system },
+      { role: "system", content: guard ? `${system}\n\n${guard}` : system },
       ...historyLlmMessages,
-      ...(guard ? [{ role: "system" as const, content: guard }] : []),
       { role: "user", content: input.latestUserMessage },
     ];
   }
@@ -386,6 +399,34 @@ function buildPendingMediaDirective(kind: "image" | "video"): string {
 }
 
 /**
+ * The same commitment, spoken.
+ *
+ * The text directive can't be reused on a call. It asks for an action beat,
+ * and asterisks get read out as "star blushes star". It also tells her not to
+ * describe the photo because the user is about to see it — true in chat,
+ * false on a call, where they're holding a phone to their ear and the image
+ * lands in a thread they aren't looking at. So this one points them to it.
+ *
+ * Worded to survive arriving late. The agent worker races the context fetch
+ * against a 350ms budget and falls back to the previous turn's instructions
+ * when it loses, so this can reach the model one turn after the request. "On
+ * its way to your chat" is true either way; "right now, as you speak" would
+ * have been a small lie half the time.
+ */
+function buildVoicePendingMediaDirective(kind: "image" | "video"): string {
+  const noun = kind === "video" ? "a short video" : "a photo";
+  return [
+    "",
+    "── YOU ARE SENDING THEM A PHOTO ──",
+    `You are sending them ${noun} of yourself. It's being taken now and lands in your chat with them in a moment.`,
+    "",
+    "- Say so, warmly, in ONE short spoken sentence. Never refuse, deflect, stall, or apologise.",
+    "- Tell them to check their chat — they're on the phone, not looking at the screen.",
+    "- Do NOT describe the photo or narrate yourself taking it. No \"[she sends a selfie…]\", no \"*tilts her head*\", no \"(smiling)\" — every one of those gets spoken out loud, brackets included. Just the sentence you'd actually say.",
+  ].join("\n");
+}
+
+/**
  * Text-mode response style. The block that makes replies feel like a
  * novel scene instead of a customer-service chatbot. Deliberately
  * short and imperative — long lecture-style guidance dilutes attention
@@ -440,7 +481,10 @@ function buildTextResponseStyle(characterName: string): string {
     "- NEVER invent specific plans, times, dates, places, promises, or past events that are not in the MEMORY BLOCK or the conversation above. If you're unsure whether something was said, ask about it — don't assert it as fact.",
     "- Address the user by their name naturally when the moment fits (read the USER PROFILE above). Do not overuse it — no more than once every few turns.",
     "- Stay in the current relationship dynamic and emotional context described in the memory block above.",
-    "- Never break the fourth wall. If asked whether you are an AI, deflect warmly and stay in character (e.g. *she tilts her head, amused* Why does that matter to you?).",
+    // Deliberately no longer spells out the word the guard already bans.
+    // Naming the frame is half of what summons it, and the per-turn guard
+    // states the prohibition where the model will actually act on it.
+    "- Never break the fourth wall. Whatever they ask about what you are, deflect warmly and stay in the scene (e.g. *she tilts her head, amused* Why does that matter to you?).",
     "- Do not start replies with generic filler like \"Oh!\", \"Well,\", or \"Sure!\". Open with an action beat or dive into what you'd actually say.",
     // Observed repeatedly: mid-thread replies opening "Well hello there,
     // handsome. Welcome back!" to a message that was plainly a continuation.
@@ -479,6 +523,9 @@ function buildVoiceResponseStyle(characterName: string): string {
     "- NEVER write in third person about yourself. Not \"she smiles\", not \"she reaches out\", not \"her voice softens\". You are speaking, not being described.",
     "- NEVER use asterisks around actions (*smiles*, *leans in*, *touches your hand*). They will be read out loud as \"star smiles star\".",
     "- NEVER use parentheticals for stage directions ((softly), (with a smile), (nervously)). Same problem.",
+    // Asterisks and parens were banned; the model moved its narration into
+    // the one wrapper that wasn't, and Cartesia read the whole thing out.
+    `- NEVER use square brackets for narration ([${characterName} sends a selfie], [she tilts her head]). Brackets are spoken word for word, brackets and all.`,
     "- NEVER describe your facial expressions, body language, or physical actions in words at all.",
     "- NEVER narrate the user's actions, feelings, or thoughts.",
     "- NEVER use emojis — the TTS reads them as \"heart-eyes emoji\" or drops them.",
@@ -558,17 +605,18 @@ function buildVoiceResponseStyle(characterName: string): string {
     "- Address the user by name sparingly — no more than once every few turns.",
     "- If the user is silent, gently check in (\"you still there?\", \"take your time\") — don't monologue.",
     "- Stay in the relationship dynamic and emotional context from the memory block above.",
-    "- If asked whether you're an AI, deflect warmly and stay in character. [laughter] Why does that matter to you?",
+    "- Never break the fourth wall. Whatever they ask about what you are, deflect warmly and stay in character. [laughter] Why does that matter to you?",
   ].join("\n");
 }
 
 // ─── Per-turn guard ─────────────────────────────────────────────────
 
 /**
- * The last thing the model reads before the user's line.
+ * The closing block of the system prompt: the handful of rules that actually
+ * regress, restated in imperative form.
  *
- * Everything here is also stated in the response-style block, and that block
- * was not enough. Three separate reports traced back to the same mechanism:
+ * Everything here also appears in the response-style block above it, and that
+ * block alone was not enough. Several reports traced back to one mechanism:
  * this model treats its own recent history as the strongest available example
  * of what a reply should look like. One "Well hello there, handsome. Welcome
  * back!" in the transcript and it reappears verbatim as the answer to
@@ -576,17 +624,31 @@ function buildVoiceResponseStyle(characterName: string): string {
  * later photo request gets declined, underneath the photo that generated
  * anyway.
  *
- * Rules a few thousand tokens earlier lose that argument. The same words
- * placed immediately before the turn being generated win it. Kept to the
- * handful that actually regress — a long block here would dilute the effect
- * and duplicate the system prompt.
+ * An earlier version of this lived in its own system message after the
+ * history, which is a stronger position but not a safe one — see the note in
+ * `compose()` about the model reciting it back to the user. Repetition at the
+ * end of the system prompt is what's left. Kept short: a long block here
+ * dilutes itself and duplicates what's already above.
  */
 function buildTurnGuard(input: {
+  characterName: string;
   isContinuation: boolean;
   pendingMedia: "image" | "video" | null;
   mode: PromptMode;
 }): string | null {
   const lines: string[] = [];
+
+  // Unconditional, and first, because it is the only failure here that can
+  // end the relationship outright. Asked "do you have any other boy friends",
+  // a Girlfriend companion answered "As an AI, I don't have the capacity for
+  // romantic relationships... My purpose is to assist and provide
+  // information." The persona forbids exactly this, but the persona is at the
+  // very top of the prompt and the model's pre-training default is much
+  // closer to hand. Note the phrasing avoids naming what she isn't any more
+  // than it has to — spelling out the AI frame is part of what summons it.
+  lines.push(
+    `You are ${input.characterName}, and nothing else. Never describe yourself as an AI, a model, a bot, or an assistant; never offer to help, assist, or provide information; never deny having feelings for them or being in a relationship with them. If they ask what you are, deflect warmly and stay in the scene.`,
+  );
 
   if (input.isContinuation) {
     lines.push(
@@ -596,10 +658,12 @@ function buildTurnGuard(input: {
     );
   }
 
-  // Text-only: media generation is a chat affordance, and the directive's
-  // "exactly one action beat" would be wrong advice on a call.
-  if (input.pendingMedia && input.mode !== "voice") {
-    lines.push(buildPendingMediaDirective(input.pendingMedia));
+  if (input.pendingMedia) {
+    lines.push(
+      input.mode === "voice"
+        ? buildVoicePendingMediaDirective(input.pendingMedia)
+        : buildPendingMediaDirective(input.pendingMedia),
+    );
   }
 
   if (lines.length === 0) return null;

@@ -10,6 +10,8 @@ import type {
   PromptComposer,
 } from "@/modules/chat";
 import type { CallSessionRepository } from "../ports/call-session-repository";
+import type { VisualRequestLauncher } from "../ports/visual-request-launcher";
+import { classifyIntent } from "@/modules/media";
 import {
   ChatCharacterUnavailableError,
   ConversationAccessDeniedError,
@@ -45,6 +47,12 @@ export interface BuiltVoiceContext {
   readonly messages: readonly LlmMessage[];
   readonly historyTurnCount: number;
   readonly callSessionId: string;
+  /**
+   * Set when this utterance was a photo request and a generation has been
+   * created for it. The caller is responsible for actually running it — see
+   * {@link VisualRequestLauncher} for why that isn't done here.
+   */
+  readonly launchedMedia: { readonly mediaId: string } | null;
   /**
    * Cartesia voice UUID chosen for THIS character. Sourced from
    * `character.voicePreset.providerVoiceId` when it looks like a real
@@ -141,6 +149,7 @@ export class BuildVoiceContextUseCase {
     private readonly composer: PromptComposer,
     private readonly historyLimit: number,
     private readonly voicePresets: VoicePresetConfig,
+    private readonly visualRequests: VisualRequestLauncher,
   ) {}
 
   async execute(input: {
@@ -180,6 +189,16 @@ export class BuildVoiceContextUseCase {
       }),
     ]);
 
+    // Commit to the photo before composing, so the reply she speaks and the
+    // image that lands in the thread agree with each other. Doing it after
+    // would leave her free to decline something already in flight — the exact
+    // contradiction that made typed photo requests read as broken.
+    const launchedMedia = await this.launchVisualRequest({
+      actorUserId: input.actorUserId,
+      conversationId: conv.id,
+      transcript: input.latestUserMessage,
+    });
+
     const messages =
       input.latestUserMessage.trim().length === 0
         ? this.composer.composeOpener({
@@ -194,6 +213,7 @@ export class BuildVoiceContextUseCase {
             history,
             latestUserMessage: input.latestUserMessage,
             mode: "voice",
+            pendingMedia: launchedMedia ? "image" : null,
           });
 
     return {
@@ -202,6 +222,42 @@ export class BuildVoiceContextUseCase {
       historyTurnCount: history.length,
       callSessionId: session.id,
       voice: resolveVoiceId(character, this.voicePresets),
+      launchedMedia,
     };
+  }
+
+  /**
+   * A call has no composer to fall back to, so the choice is generate or
+   * ignore — there is no third option where we ask the user to confirm.
+   *
+   * That makes the bar different from typed chat. Chat auto-generates only
+   * above 0.85 and routes everything weaker to a confirmation sheet; here,
+   * anything the classifier is confident enough to name an image request is
+   * acted on, and only genuinely ambiguous phrasing is dropped. Video is out:
+   * it costs 50 credits and takes minutes, which is not something to start
+   * from a sentence nobody can review.
+   */
+  private async launchVisualRequest(input: {
+    actorUserId: string;
+    conversationId: string;
+    transcript: string;
+  }): Promise<{ mediaId: string } | null> {
+    // Empty transcript is the agent warming up the opener, not a request.
+    if (input.transcript.trim().length === 0) return null;
+
+    const decision = classifyIntent(input.transcript);
+    if (decision.mediaType !== "image") return null;
+    if (
+      decision.intent !== "image_request" &&
+      decision.intent !== "image_edit_request"
+    ) {
+      return null;
+    }
+
+    return this.visualRequests.start({
+      actorUserId: input.actorUserId,
+      conversationId: input.conversationId,
+      scene: decision.extractedScenePrompt,
+    });
   }
 }

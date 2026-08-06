@@ -30,6 +30,7 @@ export {
 export {
   stripModalityTags,
   humanizeTtsMarkers,
+  stripLeakedPrompt,
   sanitizeAssistantReply,
 } from "./domain/sanitize-reply";
 

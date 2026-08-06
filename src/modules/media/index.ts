@@ -19,5 +19,13 @@ export { previewMediaPromptAction } from "./presentation/actions/preview-media-p
 export { listRecentMediaAction } from "./presentation/actions/list-recent-media.action";
 
 export type { MediaGenerationDto, StartMediaInput, StartMediaResult, MediaStatusDto, RecentMediaItem, PreviewMediaPromptInput, PreviewMediaPromptResult } from "./application/dto/media-generation.dto";
+/**
+ * The intent classifier is a pure function over a string, already public to
+ * the browser via `./client`. The voice path needs it server-side too: an STT
+ * transcript is the only signal a call gives us that a photo was asked for.
+ */
+export { classifyIntent } from "./domain/visual-intent";
+export type { IntentDecision, VisualIntent } from "./domain/visual-intent";
+
 export type { MediaKind, MediaGenerationStatus } from "./domain/media-generation";
 export { InsufficientCreditsError, MediaGenerationNotFoundError, MediaGenerationAccessDeniedError } from "./domain/media-generation";

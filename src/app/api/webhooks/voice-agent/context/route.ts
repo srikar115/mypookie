@@ -1,6 +1,6 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { NextRequest } from "next/server";
+import { after, type NextRequest } from "next/server";
 import { z } from "zod";
 import { getServerContext } from "@/composition/server-context";
 import {
@@ -14,6 +14,7 @@ import {
   createBuildVoiceContextUseCase,
 } from "@/modules/voice";
 import { createAssembleContextUseCase } from "@/modules/memory";
+import { createRunMediaGenerationUseCase } from "@/modules/media";
 import { env } from "@/config/env";
 
 /**
@@ -39,6 +40,9 @@ const bodySchema = z.object({
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+// A photo asked for out loud is generated in `after()`, which keeps the
+// invocation alive past the response. fal takes up to ~90s for an image.
+export const maxDuration = 180;
 
 export async function POST(request: NextRequest): Promise<Response> {
   const secret = env.LIVEKIT_WEBHOOK_KEY;
@@ -97,6 +101,23 @@ export async function POST(request: NextRequest): Promise<Response> {
     }
     console.error("[voice.webhook.context]", e);
     return jsonError(500, "Unexpected server error.");
+  }
+
+  // Runs after the response is flushed: the agent gets its context — and the
+  // user hears her answer — without waiting on fal. The photo lands in the
+  // chat thread a minute later, which is what she just said would happen.
+  if (built.launchedMedia) {
+    const { mediaId } = built.launchedMedia;
+    after(async () => {
+      try {
+        await createRunMediaGenerationUseCase(server).execute({
+          mediaId,
+          actorUserId: payload.actorUserId,
+        });
+      } catch (e) {
+        console.warn("[voice.webhook.context] photo generation failed", e);
+      }
+    });
   }
 
   let model;

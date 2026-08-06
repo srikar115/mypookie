@@ -102,7 +102,20 @@ export class RecordVoiceTurnUseCase {
 
     // Both rows in one transaction so the memory ingest sees a consistent
     // (userMessage, assistantMessage) pair even under concurrent writes.
+    let mediaMovedTo: Date | null = null;
     await this.db.$transaction(async (tx) => {
+      // A photo asked for on a call is launched from the context webhook,
+      // which runs before either row of this turn exists. Left where it
+      // lands, the photo bubble sorts above the request that produced it —
+      // the user sees the selfie, then "Share your picture." underneath it.
+      // Note where the transcript currently ends so we can find that
+      // placeholder once the pair is written.
+      const lastUserBefore = await tx.message.findFirst({
+        where: { conversationId: session.conversationId, role: "USER" },
+        orderBy: { createdAt: "desc" },
+        select: { createdAt: true },
+      });
+
       await tx.message.create({
         data: {
           id: userId,
@@ -134,9 +147,26 @@ export class RecordVoiceTurnUseCase {
           createdAt: assistantNow,
         },
       });
+      // Any media placeholder sitting after the previous user turn but
+      // before this write belongs to the turn we're recording. Move it below
+      // the reply — which is where it reads correctly, since the reply is
+      // her telling them to go check their chat. The `lt: now` bound keeps
+      // the two rows we just wrote out of it.
+      const mediaAt = new Date(assistantNow.getTime() + 1);
+      const { count } = await tx.message.updateMany({
+        where: {
+          conversationId: session.conversationId,
+          role: "ASSISTANT",
+          mediaGenerationId: { not: null },
+          createdAt: { gt: lastUserBefore?.createdAt ?? new Date(0), lt: now },
+        },
+        data: { createdAt: mediaAt },
+      });
+      if (count > 0) mediaMovedTo = mediaAt;
+
       await tx.conversation.update({
         where: { id: session.conversationId },
-        data: { lastMessageAt: assistantNow },
+        data: { lastMessageAt: mediaMovedTo ?? assistantNow },
       });
     });
 

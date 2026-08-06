@@ -54,6 +54,40 @@ export class PrismaCallSessionRepository implements CallSessionRepository {
     return row ? toDto(row) : null;
   }
 
+  async reapAbandonedByUser(input: {
+    userId: string;
+    silentSince: Date;
+    now: Date;
+  }): Promise<number> {
+    const abandoned = await this.db.callSession.findMany({
+      where: {
+        userId: input.userId,
+        endedAt: null,
+        updatedAt: { lt: input.silentSince },
+      },
+      select: { id: true, startedAt: true, updatedAt: true },
+    });
+
+    for (const row of abandoned) {
+      // The call ended around its last tick, not now. Closing it at `now`
+      // would bill every hour the browser sat closed against the daily cap.
+      const endedAt = row.updatedAt;
+      await this.db.callSession.update({
+        where: { id: row.id },
+        data: {
+          endedAt,
+          durationSec: Math.max(
+            0,
+            Math.round((endedAt.getTime() - row.startedAt.getTime()) / 1000),
+          ),
+          dropReason: "abandoned",
+        },
+      });
+    }
+
+    return abandoned.length;
+  }
+
   async minutesUsedInLastDay(userId: string, now: Date): Promise<number> {
     const since = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     // Sum finalized durations + estimate the running duration on any

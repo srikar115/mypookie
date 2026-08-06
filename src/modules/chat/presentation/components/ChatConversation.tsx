@@ -37,6 +37,21 @@ import type { RecentMediaItem, StartMediaResult } from "@/modules/media/client";
 import { clientEnv } from "@/config/client-env";
 import { MEDIA_COSTS } from "@/config/media";
 
+/**
+ * Call states in which a new voice turn can appear in the transcript —
+ * everything between "the character picked up" and "somebody hung up".
+ *
+ * Module-level so membership can be collapsed to a boolean the polling effect
+ * can depend on. Depending on `call.state` itself does not work: it tracks
+ * voice activity and flips several times a second while anyone is talking.
+ */
+const CALL_ACTIVE_STATES: readonly CallState[] = [
+  "listening",
+  "user_speaking",
+  "character_thinking",
+  "character_speaking",
+];
+
 // Public feature flags (client-safe, from NEXT_PUBLIC_ env vars).
 const VOICE_CALLS_ENABLED = clientEnv.NEXT_PUBLIC_VOICE_CALLS_ENABLED;
 const CHAT_MEDIA_ENABLED = clientEnv.NEXT_PUBLIC_CHAT_MEDIA_ENABLED;
@@ -219,33 +234,43 @@ export function ChatConversation({
       }, 700);
       return () => clearTimeout(t);
     }
+    // She just stopped talking — refresh now, this is what makes the
+    // transcript feel live rather than the interval below.
+    //
+    // No delay, deliberately. The worker posts `/voice-agent/turn` when the
+    // reply FINALIZES (`ConversationItemAdded`), and TTS then plays that text
+    // for several seconds, so the write is long since done by the time the
+    // audio stops. A delay would only add a window in which this effect
+    // re-runs — which it does on every voice-activity flip — and cancels its
+    // own pending timer the moment the user starts speaking again.
+    if (prev === "character_speaking" && call.state === "listening") {
+      void refresh();
+    }
   }, [call.state, refresh]);
 
   // ─── Live transcript during a call ────────────────────────────
-  // Poll the messages endpoint while a call is active so each voice
-  // turn (user STT + character reply) appears in the chat feed in
-  // near-real-time, matching Candy AI's dual-modality UX. Two seconds
-  // is a good compromise: fast enough to feel live, cheap enough to
-  // run for the whole call. The RecordVoiceTurnUseCase persists both
-  // messages atomically, so a poll either sees both or neither — no
-  // half-written rows.
+  // Backstop poll while a call is active, so a turn the edge-triggered
+  // refresh above missed (dropped request, a reply that finalized during a
+  // pause in speech) still lands within a couple of seconds. The
+  // RecordVoiceTurnUseCase persists both messages atomically, so a poll
+  // either sees both or neither — no half-written rows.
   //
-  // Polls only when a turn is actually possible (not while
-  // ringing/connecting and not after end/error).
+  // Depends on a BOOLEAN, not on `call.state`. `call.state` is derived from
+  // LiveKit's voice-activity events and changes several times a second while
+  // anyone is talking; with it in the dependency array, every flip tore down
+  // the interval and restarted the countdown from zero, so the timer only
+  // ever completed during a silence long enough to be rare in an actual
+  // conversation. The transcript looked frozen mid-call and caught up all at
+  // once on hang-up.
+  const callActive = CALL_ACTIVE_STATES.includes(call.state);
   const CALL_POLL_MS = 2000;
   useEffect(() => {
-    const activeStates: CallState[] = [
-      "listening",
-      "user_speaking",
-      "character_thinking",
-      "character_speaking",
-    ];
-    if (!activeStates.includes(call.state)) return;
+    if (!callActive) return;
     const interval = setInterval(() => {
       void refresh();
     }, CALL_POLL_MS);
     return () => clearInterval(interval);
-  }, [call.state, refresh]);
+  }, [callActive, refresh]);
   const handleSpeakAgain = () => {
     if (!conversationId) return;
     setSpeakAgainSignal((n) => n + 1);

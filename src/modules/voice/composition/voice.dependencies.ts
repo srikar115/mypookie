@@ -8,7 +8,9 @@ import {
   createPromptComposer,
 } from "@/modules/chat";
 import type { MemoryContextProvider } from "@/modules/chat";
+import { createStartMediaGenerationUseCase } from "@/modules/media";
 import { PrismaCallSessionRepository } from "../infrastructure/prisma-call-session.repository";
+import { MediaVisualRequestLauncher } from "../infrastructure/media-visual-request.launcher";
 import { LivekitTransportAdapter } from "../infrastructure/livekit-transport.adapter";
 import { ModelConfigSttAdapter } from "../infrastructure/model-config-stt.adapter";
 import { ModelConfigTtsAdapter } from "../infrastructure/model-config-tts.adapter";
@@ -153,6 +155,7 @@ export function createBuildVoiceContextUseCase(
       male: env.CARTESIA_VOICE_ID_MALE,
       nonbinary: env.CARTESIA_VOICE_ID_NONBINARY,
     },
+    new MediaVisualRequestLauncher(createStartMediaGenerationUseCase(ctx)),
   );
 }
 

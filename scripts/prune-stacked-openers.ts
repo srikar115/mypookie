@@ -1,19 +1,24 @@
 /**
- * One-off repair for threads polluted by the pre-policy opener bug.
+ * Repairs assistant turns that poison the thread they're in.
  *
- * Before `domain/opener-policy.ts` existed, the opener route generated a
- * greeting every time it was called and persisted it. Threads accumulated
- * unanswered greetings, and once recent history was mostly greetings the
- * model imitated the pattern and answered every message with one too.
+ * The unifying reason all of these have to be deleted rather than just
+ * prevented: this model treats its own recent history as the strongest
+ * available example of what a reply should look like. Every category below
+ * reproduces itself for as long as one copy remains in the transcript, no
+ * matter what the system prompt says.
  *
- * This removes the damage so the model sees a clean thread again:
- *   - stacked openers: assistant turns with no user turn before them
+ *   - stacked openers: assistant turns with no user turn before them, left by
+ *     the opener bug that predated `domain/opener-policy.ts`
  *   - recycled greetings: assistant turns repeating text sent earlier in the
  *     thread verbatim (the tell-tale sign of the greeting loop); the first
  *     copy is kept, later ones go
  *   - contradicted refusals: a "I'd rather not share photos" reply sitting
  *     directly above the photo that was generated anyway. Left in place the
  *     model reads it as precedent and refuses every later request too.
+ *   - broken character: "As an AI, I don't have the capacity for romantic
+ *     relationships. My purpose is to assist and provide information." The
+ *     worst thing a companion can say, and one occurrence teaches the model
+ *     that this register belongs in this conversation.
  *
  * The conversation's first message is always kept — that opener is
  * legitimate. User messages and media are never touched.
@@ -99,6 +104,17 @@ async function prune(conversationId: string) {
   const REFUSAL =
     /\b(prefer to keep|rather not|not comfortable|won'?t be sharing|can'?t (share|send)|keep (things|it) (a bit )?(private|mysterious)|leave (something|a little) to the imagination)\b/i;
 
+  // Phrases that only ever appear when the assistant persona has collapsed
+  // into its pre-training default. Kept narrow: each one is a construction no
+  // in-character reply would produce.
+  const OUT_OF_CHARACTER =
+    /(\bas an ai\b|\bi'?m an ai\b|\bi am an ai\b|artificial intelligence|language model|my purpose is to (assist|help|provide)|i don'?t have (the capacity|personal feelings|feelings or)|here to (assist|help you)\b)/i;
+
+  // Replies that recited the system prompt. Prompt section headers are
+  // written with box-drawing characters (U+2500) exactly so they can be
+  // recognised — no character types one in dialogue.
+  const RECITED_PROMPT = /\u2500{2,}\s*[A-Z][A-Z0-9 '’·-]*\s*\u2500{2,}/;
+
   const doomed: Array<{ id: string; why: string; at: Date; text: string }> = [];
   for (let i = 0; i < turns.length; i++) {
     const r = turns[i];
@@ -120,6 +136,8 @@ async function prune(conversationId: string) {
       stacked && "stacked",
       recycled && "recycled",
       contradicted && "contradicted",
+      OUT_OF_CHARACTER.test(r.content) && "out-of-character",
+      RECITED_PROMPT.test(r.content) && "recited-prompt",
     ]
       .filter(Boolean)
       .join("+");

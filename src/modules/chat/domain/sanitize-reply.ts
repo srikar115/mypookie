@@ -66,8 +66,41 @@ const SINGLE_WORD_VERB: Record<string, string> = {
 
 const BRACKET_MARKER_RE = /\[([^\][\n]{1,40})\]/g;
 
+/**
+ * A full narration sentence the model wrapped in square brackets:
+ *
+ *   "[Ananya sends a playful selfie, tilting her head with a mischievous
+ *    smile…] I hope this meets your request, Karthik."
+ *
+ * The voice protocol bans third-person narration in asterisks and in
+ * parentheses; brackets were the one wrapper left unclaimed, and the model
+ * found it. Unlike asterisks — which the agent worker strips before Cartesia
+ * sees them — brackets go straight through to the voice engine, so the user
+ * genuinely heard this read aloud.
+ *
+ * Which is why it becomes an action beat rather than being deleted: it's the
+ * same thing a typed `*she tilts her head*` is, and the transcript should
+ * show what happened, in the purple italic that marks an action everywhere
+ * else. The length floor keeps this off Cartesia's short cue markers, which
+ * the pass below already handles.
+ */
+const NARRATION_BRACKET_RE = /\[([^\][\n]{41,400})\]/g;
+
+/**
+ * Composer cues are bracketed too — `[The user has been away for hours…]`.
+ * Those are instructions about the user, not the character doing something,
+ * and dressing one up as an action beat would make a prompt leak look
+ * deliberate. They get dropped instead.
+ */
+const PROMPT_CUE_RE = /\bthe user\b/i;
+
 export function humanizeTtsMarkers(text: string): string {
   return text
+    .replace(NARRATION_BRACKET_RE, (_full, inner: string) => {
+      const narration = inner.trim();
+      if (PROMPT_CUE_RE.test(narration)) return "";
+      return `*${narration}*`;
+    })
     .replace(BRACKET_MARKER_RE, (_full, inner: string) => {
       const cue = inner.trim().toLowerCase();
       if (cue === "breath" || cue === "exhale" || cue === "inhale") return "";
@@ -82,12 +115,43 @@ export function humanizeTtsMarkers(text: string): string {
 }
 
 /**
+ * Prompt section headers, e.g. `── THIS TURN ──`, `── RESPONSE STYLE ──`.
+ *
+ * Written with box-drawing characters (U+2500) rather than dashes precisely
+ * so they can be recognised: no character would type one in dialogue. Their
+ * appearance in output means the model has started reciting its instructions
+ * instead of answering.
+ */
+const PROMPT_SECTION_RE = /\u2500{2,}\s*[A-Z][A-Z0-9 '’·-]*\s*\u2500{2,}/;
+
+/**
+ * Cuts a recited prompt out of a reply.
+ *
+ * Asked "lets have a call", the model once answered with the verbatim text of
+ * its own turn guard followed by the response-style block. The prompt shape
+ * that caused it is fixed, but a leak is bad enough — it exposes the system
+ * prompt and shatters the character in one move — that it's worth a
+ * deterministic net rather than trusting the prompt alone.
+ *
+ * Everything from the first section header onward goes. If real dialogue came
+ * first, it survives; if the reply was nothing but prompt, the caller is left
+ * with an empty string, which is a far better outcome than showing it.
+ */
+export function stripLeakedPrompt(text: string): string {
+  const match = PROMPT_SECTION_RE.exec(text);
+  if (!match) return text;
+  return text.slice(0, match.index).trim();
+}
+
+/**
  * Full clean for an assistant reply headed to the chat transcript:
- * modality tags out, TTS markers converted to beats, whitespace tidied,
- * and the visual-action sentinel stripped so it never reaches the UI, TTS,
- * or the DB content column.
+ * recited prompt out, modality tags out, TTS markers converted to beats,
+ * whitespace tidied, and the visual-action sentinel stripped so it never
+ * reaches the UI, TTS, or the DB content column.
  */
 export function sanitizeAssistantReply(text: string): string {
   // Strip the <<VA{...}>> sentinel first so downstream regexes don't see it.
-  return humanizeTtsMarkers(stripModalityTags(stripVisualActionSentinel(text)));
+  return humanizeTtsMarkers(
+    stripModalityTags(stripLeakedPrompt(stripVisualActionSentinel(text))),
+  );
 }

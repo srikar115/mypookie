@@ -30,6 +30,29 @@ export interface CallSessionRepository {
   findActiveByUser(userId: string): Promise<CallSessionDto | null>;
 
   /**
+   * Closes the caller's abandoned calls — rows still open whose last sign of
+   * life predates `silentSince`.
+   *
+   * A call is only finalized by the client hanging up or by LiveKit's
+   * `room_finished` webhook. Both can go missing: a killed browser sends
+   * neither, and a LiveKit deployment that cannot reach this app (local dev,
+   * a tunnel that expired, a misconfigured webhook URL) never delivers the
+   * fallback. The row then stays open forever, and because it is open it both
+   * blocks every future call and is billed as one continuous call against the
+   * daily cap.
+   *
+   * Liveness comes from `updatedAt`: the credit ticker touches a live session
+   * every 12 seconds, so silence measured in minutes means nobody is there.
+   *
+   * Returns the number of rows closed.
+   */
+  reapAbandonedByUser(input: {
+    userId: string;
+    silentSince: Date;
+    now: Date;
+  }): Promise<number>;
+
+  /**
    * Total voice minutes spent by a user in the last 24 hours, rounded up.
    * Used to enforce the daily cap.
    */

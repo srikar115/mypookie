@@ -3,12 +3,15 @@
  *
  *  1. The "you are sending a photo" directive appears only when the app has
  *     actually committed to generating one.
- *  2. The per-turn guard (no greeting, no repetition) is the LAST thing the
- *     model reads before the user's line. Placement is the whole point — the
- *     same rules sat in the system prompt and lost to the history.
+ *  2. The message array is exactly one system message followed by the
+ *     conversation. A second one placed after the history got recited back to
+ *     the user verbatim, and the voice agent drops all but the first.
+ *  3. Nothing the model wraps in brackets or asterisks reaches the transcript
+ *     as raw prose — and no recited prompt reaches it at all.
  */
 import { TemplatePromptComposer } from "../src/modules/chat/infrastructure/template-prompt-composer";
 import { classifyIntent, needsCompose } from "../src/modules/media/domain/visual-intent";
+import { sanitizeAssistantReply } from "../src/modules/chat/domain/sanitize-reply";
 import type { MessageDto } from "../src/modules/chat/application/dto/message.dto";
 
 const composer = new TemplatePromptComposer();
@@ -56,24 +59,45 @@ console.log("turn guard placement:");
 {
   const msgs = build({});
   const last = msgs[msgs.length - 1]!;
-  const beforeLast = msgs[msgs.length - 2]!;
   check("conversation ends on the user's turn", last.role === "user");
-  check("guard sits immediately before it", beforeLast.role === "system");
-  check("guard carries the anti-greeting rule", beforeLast.content.includes(GUARD) && beforeLast.content.includes("Do NOT greet"));
-  check("guard forbids repeating an earlier reply", beforeLast.content.includes("Do NOT repeat or rephrase"));
-  check(
-    "guard is separate from the persona system prompt",
-    msgs[0]!.content.includes("<persona>") && !msgs[0]!.content.includes(GUARD),
-  );
+  // Exactly one, at position 0. A second system message after the history
+  // got recited back to the user verbatim, and the voice agent drops all but
+  // the first anyway. Both failures are silent, so assert the shape.
+  const systemMessages = msgs.filter((m) => m.role === "system");
+  check("exactly one system message", systemMessages.length === 1);
+  check("and it is the first message", msgs[0]!.role === "system");
+
+  const instructions = systemMessages[0]!.content;
+  check("guard rides at the end of it", instructions.includes(GUARD));
+  check("persona is still there too", instructions.includes("<persona>"));
+  check("guard carries the anti-greeting rule", instructions.includes("Do NOT greet"));
+  check("guard forbids repeating an earlier reply", instructions.includes("Do NOT repeat or rephrase"));
 }
 
 console.log("\nfirst message of a thread:");
 {
   const msgs = build({ withHistory: false });
+  const guard = msgs.find((m) => m.content.includes(GUARD));
+  check("guard is still present", guard !== undefined);
   check(
-    "no 'do not greet' guard when there is nothing to continue",
-    msgs.some((m) => m.content.includes(GUARD)),
+    "but says nothing about greeting — a greeting is correct here",
+    guard?.content.includes("Do NOT greet") ?? false,
     false,
+  );
+}
+
+console.log("\nstaying in character:");
+for (const withHistory of [true, false]) {
+  const msgs = build({ withHistory });
+  const guard = msgs.find((m) => m.content.includes(GUARD))!;
+  const where = withHistory ? "mid-thread" : "first message";
+  check(`named as herself, ${where}`, guard.content.includes("You are Banana, and nothing else"));
+  check(`AI disclosure banned, ${where}`, guard.content.includes("Never describe yourself as an AI"));
+  // The reply that prompted this rule denied the relationship, in answer to a
+  // question that was never about what she is.
+  check(
+    `denying the relationship banned, ${where}`,
+    guard.content.includes("never deny having feelings for them"),
   );
 }
 
@@ -88,11 +112,78 @@ console.log("\npending media:");
   check("anti-refusal rule always present", none.includes(REFUSAL_RULE));
   check("no double-generate sentinel ask", image.includes("Do NOT add a <<VA>> sentinel"));
 
-  // It has to ride in the guard, not the system prompt — that move is the fix.
   const msgs = build({ pendingMedia: "image" });
+  check("directive rides in the guard", msgs[0]!.content.includes(SENTINEL));
+}
+
+console.log("\na recited prompt never reaches the user:");
+{
+  // The exact shape of the observed leak: the reply began at the guard's own
+  // header and recited from there.
+  const instructions = build({})[0]!.content;
+  const leaked = instructions.slice(instructions.indexOf(GUARD));
+  check("whole-reply leak is reduced to nothing", sanitizeAssistantReply(leaked) === "");
   check(
-    "directive rides in the guard, next to the user turn",
-    msgs[msgs.length - 2]!.content.includes(SENTINEL),
+    "dialogue before a leak survives",
+    sanitizeAssistantReply(`*smiles* Sure, let's call.\n\n${leaked}`) ===
+      "*smiles* Sure, let's call.",
+  );
+  check(
+    "ordinary replies are untouched",
+    sanitizeAssistantReply("*grins* Yeah — call me in five?") ===
+      "*grins* Yeah — call me in five?",
+  );
+  // Em dashes and ellipses are everywhere in this character's voice; only the
+  // box-drawing header should ever trip the stripper.
+  check(
+    "em dashes and asterisks don't trip it",
+    sanitizeAssistantReply("*laughs* I — okay, fine… you win.") ===
+      "*laughs* I — okay, fine… you win.",
+  );
+}
+
+console.log("\nspoken narration reads as an action beat:");
+{
+  // Verbatim from a call: she narrated the selfie in brackets, Cartesia read
+  // the whole thing aloud, and the transcript showed it as flat prose.
+  const spoken =
+    "[Ananya sends a playful selfie, tilting her head with a mischievous smile while leaning in close to her phone.] I hope this meets your request, Karthik.";
+  check(
+    "bracketed narration becomes a beat",
+    sanitizeAssistantReply(spoken) ===
+      "*Ananya sends a playful selfie, tilting her head with a mischievous smile while leaning in close to her phone.* I hope this meets your request, Karthik.",
+  );
+  check(
+    "short Cartesia cues still map to their verb",
+    sanitizeAssistantReply("[laugh] Oh, stop it.") === "*laughs* Oh, stop it.",
+  );
+  check(
+    "a recited composer cue is dropped, not dressed up as a beat",
+    sanitizeAssistantReply(
+      "[The user has been away for hours and just came back.] Hey you.",
+    ) === "Hey you.",
+  );
+  check(
+    "prose without brackets is untouched",
+    sanitizeAssistantReply("Check your chat — I just sent you something.") ===
+      "Check your chat — I just sent you something.",
+  );
+
+  const voice = composer.compose({
+    character,
+    memoryBlock: "<memory>",
+    history,
+    latestUserMessage: "share your picture",
+    mode: "voice",
+    pendingMedia: "image",
+  } as never);
+  check(
+    "and the voice protocol bans the wrapper outright",
+    voice[0]!.content.includes("NEVER use square brackets for narration"),
+  );
+  check(
+    "the photo directive says not to narrate it either",
+    voice[0]!.content.includes("Do NOT describe the photo or narrate yourself"),
   );
 }
 

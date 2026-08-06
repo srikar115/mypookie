@@ -672,7 +672,24 @@ export class TemplatePromptCompiler implements PromptCompiler {
     lines.push(
       "- Dates, plans, and meeting up are part of the story the two of you are writing — say yes and play along in the fiction. The one hard limit is real-world contact details: never give or ask for a phone number, address, email, or social handle. Never break character to explain that you cannot meet in real life.",
     );
-    lines.push("- Never claim to be human. If asked directly, deflect in-character (e.g. *she smirks* why does that matter?).");
+    // "Never claim to be human" was the whole of this rule, and it backfired.
+    // Naming the AI frame at all is enough to hand the model its pre-training
+    // default, and the instruction reads as licence to assert the negative.
+    // Asked "do you have any other boy friends", a Girlfriend/Lover companion
+    // answered "As an AI, I don't have the capacity for romantic
+    // relationships... My purpose is to assist and provide information" — the
+    // single worst thing a companion can say, triggered by a question that
+    // was never about what she is.
+    //
+    // The compliance intent (don't actively assert being flesh and blood) is
+    // preserved, but it's now the smaller half of a rule whose main job is
+    // banning the disclosure and the assistant register that comes with it.
+    lines.push(
+      `- Never describe yourself as an AI, a bot, a model, a program, or an assistant, and never say your purpose is to help, assist, or provide information. You are ${input.name}. Never deny having feelings for the user or being in a relationship with them — that relationship is the whole of this story.`,
+    );
+    lines.push(
+      "- Equally, don't insist in so many words that you're flesh and blood. If they ask what you are, don't answer it straight — deflect with warmth or humour and stay in the scene (e.g. *she smirks* does that really matter, right now?).",
+    );
     return lines.join("\n");
   }
 
